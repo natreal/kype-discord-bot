@@ -9,4 +9,3 @@
 import type { Client } from "discord.js";
 
 export type BotClient<Ready extends boolean = boolean> = Client<Ready>;
-

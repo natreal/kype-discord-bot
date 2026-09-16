@@ -51,27 +51,27 @@ Discord ─► events/ ─► InteractionHandler ─► commands/ (thin)
 
 Principles enforced by the codebase:
 
-| Principle | How it is enforced |
-| --- | --- |
-| Separation of concerns | Commands describe intent and delegate to modules/services |
-| No global state | One service container, injected into commands and events |
-| No manual wiring | Commands and events are discovered from the filesystem |
-| Validated configuration | Zod schemas for environment and per-guild configuration |
-| Secrets stay secret | Single config layer, logger redaction, `.env` git-ignored |
-| Errors never leak internals | Centralized error taxonomy + safe user-facing messages |
-| Cross-platform | `node:path`, no shell assumptions, no hardcoded paths |
-| Testability | Services are constructor-injected and covered by Vitest |
+| Principle                   | How it is enforced                                        |
+| --------------------------- | --------------------------------------------------------- |
+| Separation of concerns      | Commands describe intent and delegate to modules/services |
+| No global state             | One service container, injected into commands and events  |
+| No manual wiring            | Commands and events are discovered from the filesystem    |
+| Validated configuration     | Zod schemas for environment and per-guild configuration   |
+| Secrets stay secret         | Single config layer, logger redaction, `.env` git-ignored |
+| Errors never leak internals | Centralized error taxonomy + safe user-facing messages    |
+| Cross-platform              | `node:path`, no shell assumptions, no hardcoded paths     |
+| Testability                 | Services are constructor-injected and covered by Vitest   |
 
 ---
 
 ## Requirements
 
-| Requirement | Version | Notes |
-| --- | --- | --- |
-| Node.js | **>= 24** (developed on 26.x) | `node --version` |
-| npm | >= 10 | bundled with Node.js |
-| PostgreSQL | >= 14 | required for the database layer |
-| Git | any recent version | optional but recommended |
+| Requirement | Version                       | Notes                           |
+| ----------- | ----------------------------- | ------------------------------- |
+| Node.js     | **>= 24** (developed on 26.x) | `node --version`                |
+| npm         | >= 10                         | bundled with Node.js            |
+| PostgreSQL  | >= 14                         | required for the database layer |
+| Git         | any recent version            | optional but recommended        |
 
 > **Why Node 24+?** Prisma ORM 7 requires Node ≥ 20.19, and the project targets
 > modern ESM (`NodeNext`) throughout.
@@ -94,14 +94,14 @@ DATABASE_URL=postgresql://postgres:postgres@localhost:5432/discord_bot?schema=pu
 LOG_LEVEL=info
 ```
 
-| Variable | Required | Description |
-| --- | --- | --- |
-| `NODE_ENV` | no (default `development`) | `development`, `test` or `production` |
-| `DISCORD_TOKEN` | **yes** | Bot token (Developer Portal → Bot → Token) |
-| `DISCORD_CLIENT_ID` | **yes** | Application ID (Developer Portal → General Information) |
-| `DISCORD_DEV_GUILD_ID` | no | When set, commands register in that guild for instant updates |
-| `DATABASE_URL` | **yes** | PostgreSQL connection string |
-| `LOG_LEVEL` | no (default `info`) | `debug`, `info`, `warn` or `error` |
+| Variable               | Required                   | Description                                                   |
+| ---------------------- | -------------------------- | ------------------------------------------------------------- |
+| `NODE_ENV`             | no (default `development`) | `development`, `test` or `production`                         |
+| `DISCORD_TOKEN`        | **yes**                    | Bot token (Developer Portal → Bot → Token)                    |
+| `DISCORD_CLIENT_ID`    | **yes**                    | Application ID (Developer Portal → General Information)       |
+| `DISCORD_DEV_GUILD_ID` | no                         | When set, commands register in that guild for instant updates |
+| `DATABASE_URL`         | **yes**                    | PostgreSQL connection string                                  |
+| `LOG_LEVEL`            | no (default `info`)        | `debug`, `info`, `warn` or `error`                            |
 
 Startup fails immediately (with a redacted, field-by-field report) when a
 required value is missing or malformed. Secret values are never printed.
@@ -109,13 +109,13 @@ required value is missing or malformed. Secret values are never printed.
 Consumers read configuration through the typed layer:
 
 ```ts
-config.environment          // "development" | "test" | "production"
-config.isProduction
-config.discord.token
-config.discord.clientId
-config.discord.devGuildId
-config.database.url
-config.logging.level
+config.environment; // "development" | "test" | "production"
+config.isProduction;
+config.discord.token;
+config.discord.clientId;
+config.discord.devGuildId;
+config.database.url;
+config.logging.level;
 ```
 
 ### Privileged intents
@@ -168,7 +168,7 @@ This project uses **Prisma ORM 7**, which requires:
 - a `prisma.config.ts` file declaring the schema and datasource,
 - the PostgreSQL **driver adapter** (`@prisma/adapter-pg`) at runtime.
 
-```bash
+````bash
 npm run db:generate          # generate the typed client
 npm run db:migrate           # create + apply migrations (development)
 npm run db:migrate:deploy    # apply existing migrations (production)
@@ -179,7 +179,7 @@ npm run db:migrate:deploy    # apply existing migrations (production)
 
 ```bash
 npm run dev
-```
+````
 
 Runs `tsx watch` against `src/index.ts` with `.env` loaded, restarting on
 changes. Expected output:
@@ -198,20 +198,20 @@ and closes the database pool.
 
 ### npm scripts
 
-| Script | Purpose |
-| --- | --- |
-| `npm run dev` | Development with watch mode |
-| `npm run build` | `db:generate` + TypeScript build into `dist/` |
-| `npm run start` | Run the compiled output |
-| `npm run typecheck` | Type-check without emitting |
-| `npm run lint` / `lint:fix` | ESLint |
-| `npm run format` / `format:check` | Prettier |
-| `npm test` / `test:watch` | Vitest |
-| `npm run db:generate` | Generate the Prisma client |
-| `npm run db:migrate` | Create/apply migrations (development) |
-| `npm run db:migrate:deploy` | Apply migrations (production) |
-| `npm run db:studio` | Prisma Studio |
-| `npm run deploy:commands` | Register slash commands with Discord |
+| Script                            | Purpose                                       |
+| --------------------------------- | --------------------------------------------- |
+| `npm run dev`                     | Development with watch mode                   |
+| `npm run build`                   | `db:generate` + TypeScript build into `dist/` |
+| `npm run start`                   | Run the compiled output                       |
+| `npm run typecheck`               | Type-check without emitting                   |
+| `npm run lint` / `lint:fix`       | ESLint                                        |
+| `npm run format` / `format:check` | Prettier                                      |
+| `npm test` / `test:watch`         | Vitest                                        |
+| `npm run db:generate`             | Generate the Prisma client                    |
+| `npm run db:migrate`              | Create/apply migrations (development)         |
+| `npm run db:migrate:deploy`       | Apply migrations (production)                 |
+| `npm run db:studio`               | Prisma Studio                                 |
+| `npm run deploy:commands`         | Register slash commands with Discord          |
 
 ---
 
@@ -266,8 +266,9 @@ TypeScript runs in `strict` mode with `noUncheckedIndexedAccess`,
 ESLint uses type-aware rules for `src/`, and `console` usage is banned outside the
 console log sink.
 
-npm run db:studio            # inspect data (optional)
-```
+npm run db:studio # inspect data (optional)
+
+````
 
 An initial migration is committed in `prisma/migrations/20260916000000_init`.
 Apply everything with:
@@ -284,7 +285,7 @@ npm run deploy:commands                       # register with Discord
 npm run deploy:commands -- --dry-run          # show what would be sent
 npm run deploy:commands -- --verbose          # include the raw payload
 npm run deploy:commands -- --clear-guild <id> # clear guild-scoped commands
-```
+````
 
 **Development**: set `DISCORD_DEV_GUILD_ID` in `.env`. Commands register in that
 guild and appear instantly.
@@ -296,12 +297,12 @@ which can take up to an hour to propagate.
 
 ## Available commands
 
-| Command | Category | Purpose |
-| --- | --- | --- |
-| `/ping` | core | Liveness, gateway latency and database latency |
-| `/about` | core | Version, environment, uptime, library versions |
-| `/help` | utility | Command reference generated from the registry |
-| `/serverinfo` | utility | Guild statistics plus stored bot configuration |
+| Command       | Category | Purpose                                        |
+| ------------- | -------- | ---------------------------------------------- |
+| `/ping`       | core     | Liveness, gateway latency and database latency |
+| `/about`      | core     | Version, environment, uptime, library versions |
+| `/help`       | utility  | Command reference generated from the registry  |
+| `/serverinfo` | utility  | Guild statistics plus stored bot configuration |
 
 ---
 
@@ -337,11 +338,9 @@ scripts/deploy-commands.ts    # slash-command registration
 tests/                        # Vitest suite
 ```
 
-
 ```bash
 npm run db:migrate:deploy
 ```
-
 
 ---
 
@@ -598,10 +597,8 @@ The foundation is complete. Suggested next phases, in dependency order:
 UNLICENSED — private project. Replace with your organization's license before
 publishing.
 
-
 The generated client lives in `src/generated/` and is **not** committed: it is
 recreated by `npm run db:generate` (also run automatically by `npm run build`).
-
 
 ## Installation
 

@@ -54,3 +54,7 @@ pnpm-debug.log*
 Thumbs.db
 ehthumbs.db
 desktop.ini
+
+# --- Vitest fixture directories (created by tests at runtime) ----------------
+tests/.fixtures/
+tests/.fs-fixtures/
