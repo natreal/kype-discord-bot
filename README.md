@@ -198,20 +198,25 @@ and closes the database pool.
 
 ### npm scripts
 
-| Script                            | Purpose                                       |
-| --------------------------------- | --------------------------------------------- |
-| `npm run dev`                     | Development with watch mode                   |
-| `npm run build`                   | `db:generate` + TypeScript build into `dist/` |
-| `npm run start`                   | Run the compiled output                       |
-| `npm run typecheck`               | Type-check without emitting                   |
-| `npm run lint` / `lint:fix`       | ESLint                                        |
-| `npm run format` / `format:check` | Prettier                                      |
-| `npm test` / `test:watch`         | Vitest                                        |
-| `npm run db:generate`             | Generate the Prisma client                    |
-| `npm run db:migrate`              | Create/apply migrations (development)         |
-| `npm run db:migrate:deploy`       | Apply migrations (production)                 |
-| `npm run db:studio`               | Prisma Studio                                 |
-| `npm run deploy:commands`         | Register slash commands with Discord          |
+| Script                            | Purpose                                            |
+| --------------------------------- | -------------------------------------------------- |
+| `npm run dev`                     | Development with watch mode                        |
+| `npm run build`                   | `db:generate` + TypeScript build into `dist/`      |
+| `npm run start`                   | Run the compiled output                            |
+| `npm run typecheck`               | Type-check without emitting                        |
+| `npm run lint` / `lint:fix`       | ESLint                                             |
+| `npm run format` / `format:check` | Prettier                                           |
+| `npm test` / `test:watch`         | Vitest                                             |
+| `npm run db:generate`             | Generate the Prisma client                         |
+| `npm run db:migrate`              | Create/apply migrations (development)              |
+| `npm run db:migrate:deploy`       | Apply migrations (production)                      |
+| `npm run db:smoke`                | Verify the database layer against a live server    |
+| `npm run db:studio`               | Prisma Studio                                      |
+| `npm run deploy:commands`         | Register slash commands with Discord               |
+| `npm run whoami`                  | Confirm the token, bot identity and visible guilds |
+| `npm run setup:plan`              | Preview the automatic setup actions (dry run)      |
+| `npm run setup:run`               | Apply the automatic setup to the dev guild         |
+| `npm run invite`                  | Print the pre-configured invite link               |
 
 ---
 

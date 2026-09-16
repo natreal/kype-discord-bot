@@ -77,6 +77,15 @@ export default tseslint.config(
     },
   },
 
+  // Operator-facing CLI scripts talk to a terminal, so `console` is their
+  // interface. The application itself must still go through the logger.
+  {
+    files: ["scripts/**/*.ts"],
+    rules: {
+      "no-console": "off",
+    },
+  },
+
   // Prettier must come last so formatting-related rules stay disabled.
   prettier,
 );

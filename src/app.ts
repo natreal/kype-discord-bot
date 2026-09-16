@@ -96,6 +96,12 @@ export function createApplication(): Promise<Application> {
   };
   container.set(services);
 
+  // The registry is shared with the client *before* events are registered, so
+  // handlers can read `client.commands` from the very first invocation. Without
+  // this, `client.commands` is undefined at runtime (the type augmentation only
+  // describes the shape, it does not create the property).
+  registry.applyToClient(client);
+
   const stop = (reason: string): Promise<void> => {
     logger.info("Shutting down", { reason });
     return shutdownResources({ client, container, logger });

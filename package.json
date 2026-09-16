@@ -32,6 +32,9 @@
     "db:studio": "prisma studio",
     "deploy:commands": "tsx --env-file-if-exists=.env scripts/deploy-commands.ts",
     "db:smoke": "tsx --env-file-if-exists=.env scripts/db-smoke.ts",
+    "setup:plan": "tsx --env-file-if-exists=.env scripts/setup.ts plan",
+    "setup:run": "tsx --env-file-if-exists=.env scripts/setup.ts run",
+    "whoami": "tsx --env-file-if-exists=.env scripts/whoami.ts",
     "invite": "tsx --env-file-if-exists=.env scripts/invite.ts",
     "invite:admin": "tsx --env-file-if-exists=.env scripts/invite.ts administrator --guild"
   },
