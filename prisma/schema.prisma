@@ -1,0 +1,176 @@
+// Prisma schema for the Discord bot platform foundation.
+//
+// Only the guild-scoped entities that the foundation needs exist today.
+// Feature modules (moderation, security, logging, tickets, AI, automation, ...)
+// will add their own models and relation fields to `Guild` as they land.
+
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+  runtime  = "nodejs"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+/// A Discord guild (server) the bot is installed in.
+model Guild {
+  id        String   @id
+  name      String
+  language  String   @default("en")
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  settings        GuildSettings?
+  moderation      ModerationSettings?
+  security        SecuritySettings?
+  logging         LoggingSettings?
+  ai              AISettings?
+  tickets         TicketSettings?
+  automation      AutomationSettings?
+  memberSettings  MemberSettings?
+  setupRuns       SetupRun[]
+
+  @@map("guilds")
+}
+
+/// Generic, guild-scoped key/value configuration store.
+///
+/// New modules can persist validated configuration here without a schema
+/// migration. Dedicated models below exist for values that need to be queried
+/// or indexed relationally. See `src/services/config` for the access layer.
+model GuildSettings {
+  id        String   @id @default(cuid())
+  guildId   String   @unique
+  modules   Json     @default("{}")
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  guild Guild @relation(fields: [guildId], references: [id], onDelete: Cascade)
+
+  @@map("guild_settings")
+}
+
+/// Prepared for the moderation module.
+model ModerationSettings {
+  id        String   @id @default(cuid())
+  guildId   String   @unique
+  enabled   Boolean  @default(true)
+  config    Json     @default("{}")
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  guild Guild @relation(fields: [guildId], references: [id], onDelete: Cascade)
+
+  @@map("moderation_settings")
+}
+
+/// Prepared for the security module (anti-raid / anti-nuke / lockdown).
+model SecuritySettings {
+  id        String   @id @default(cuid())
+  guildId   String   @unique
+  enabled   Boolean  @default(false)
+  lockdown  Boolean  @default(false)
+  config    Json     @default("{}")
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  guild Guild @relation(fields: [guildId], references: [id], onDelete: Cascade)
+
+  @@map("security_settings")
+}
+
+/// Prepared for the logging module.
+model LoggingSettings {
+  id        String   @id @default(cuid())
+  guildId   String   @unique
+  enabled   Boolean  @default(false)
+  config    Json     @default("{}")
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  guild Guild @relation(fields: [guildId], references: [id], onDelete: Cascade)
+
+  @@map("logging_settings")
+}
+
+/// Prepared for the AI module. Never enables unrestricted Discord access.
+model AISettings {
+  id        String   @id @default(cuid())
+  guildId   String   @unique
+  enabled   Boolean  @default(false)
+  config    Json     @default("{}")
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  guild Guild @relation(fields: [guildId], references: [id], onDelete: Cascade)
+
+  @@map("ai_settings")
+}
+
+/// Prepared for the ticket module.
+model TicketSettings {
+  id        String   @id @default(cuid())
+  guildId   String   @unique
+  enabled   Boolean  @default(false)
+  config    Json     @default("{}")
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  guild Guild @relation(fields: [guildId], references: [id], onDelete: Cascade)
+
+  @@map("ticket_settings")
+}
+
+/// Prepared for the automation module.
+model AutomationSettings {
+  id        String   @id @default(cuid())
+  guildId   String   @unique
+  enabled   Boolean  @default(false)
+  config    Json     @default("{}")
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  guild Guild @relation(fields: [guildId], references: [id], onDelete: Cascade)
+
+  @@map("automation_settings")
+}
+
+/// Prepared for member-scoped configuration (welcome, roles, ...).
+model MemberSettings {
+  id        String   @id @default(cuid())
+  guildId   String   @unique
+  config    Json     @default("{}")
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  guild Guild @relation(fields: [guildId], references: [id], onDelete: Cascade)
+
+  @@map("member_settings")
+}
+
+/// Audit trail of automatic server setup runs.
+///
+/// Setup is idempotent: resources that already exist are reused, and every run
+/// is recorded here so that a future setup wizard can report what happened.
+model SetupRun {
+  id          String   @id @default(cuid())
+  guildId     String
+  scope       String
+  status      String
+  created     Int      @default(0)
+  reused      Int      @default(0)
+  updated     Int      @default(0)
+  skipped     Int      @default(0)
+  failed      Int      @default(0)
+  details     Json     @default("[]")
+  startedAt   DateTime @default(now())
+  finishedAt  DateTime?
+  durationMs  Int?
+
+  guild Guild @relation(fields: [guildId], references: [id], onDelete: Cascade)
+
+  @@index([guildId, startedAt])
+  @@map("setup_runs")
+}
