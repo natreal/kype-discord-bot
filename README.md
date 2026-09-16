@@ -273,6 +273,27 @@ npm run db:studio # inspect data (optional)
 An initial migration is committed in `prisma/migrations/20260916000000_init`.
 Apply everything with:
 
+```bash
+npm run db:migrate:deploy
+```
+
+Verify the database layer end to end against a live server:
+
+```bash
+npm run db:smoke -- --cleanup
+```
+
+This exercises the real `DatabaseService`: connect, health check, guild upsert
+idempotency, configuration read/write with partial-merge preservation, and
+setup-run persistence. It is the one path the unit suite cannot cover, because it
+needs an actual PostgreSQL server. The same check runs in CI against a
+`postgres:16` service container.
+
+> **Homebrew note (macOS):** `brew install postgresql@16` creates a role named
+> after your macOS user, not `postgres`. Either create the role with
+> `psql -d postgres -c "CREATE ROLE postgres WITH LOGIN SUPERUSER PASSWORD 'postgres';"`
+> or point `DATABASE_URL` at your own username.
+
 ---
 
 ## Command deployment

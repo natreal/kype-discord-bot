@@ -31,6 +31,7 @@
     "db:migrate:deploy": "prisma migrate deploy",
     "db:studio": "prisma studio",
     "deploy:commands": "tsx --env-file-if-exists=.env scripts/deploy-commands.ts",
+    "db:smoke": "tsx --env-file-if-exists=.env scripts/db-smoke.ts",
     "invite": "tsx --env-file-if-exists=.env scripts/invite.ts",
     "invite:admin": "tsx --env-file-if-exists=.env scripts/invite.ts administrator --guild"
   },
