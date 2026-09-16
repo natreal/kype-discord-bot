@@ -30,7 +30,9 @@
     "db:migrate": "prisma migrate dev",
     "db:migrate:deploy": "prisma migrate deploy",
     "db:studio": "prisma studio",
-    "deploy:commands": "tsx --env-file-if-exists=.env scripts/deploy-commands.ts"
+    "deploy:commands": "tsx --env-file-if-exists=.env scripts/deploy-commands.ts",
+    "invite": "tsx --env-file-if-exists=.env scripts/invite.ts",
+    "invite:admin": "tsx --env-file-if-exists=.env scripts/invite.ts administrator --guild"
   },
   "dependencies": {
     "@prisma/adapter-pg": "^7.10.0",

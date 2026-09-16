@@ -26,3 +26,9 @@ export {
   toPosixPath,
 } from "./fs.js";
 export { formatError, redactSecrets, safeStringify } from "./serialization.js";
+export {
+  REQUIRED_SCOPES,
+  buildInviteLink,
+  profilePermissionValue,
+  type InviteLinkOptions,
+} from "./invite.js";

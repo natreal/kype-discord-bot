@@ -18,6 +18,7 @@ import {
 } from "discord.js";
 
 import { PermissionError } from "../../utils/errors.js";
+import { CRITICAL_PERMISSIONS } from "./permission-profiles.js";
 import { botPermissionsForDiscord } from "./permission-map.js";
 import { isBotPermission, type BotPermission } from "./permissions.js";
 
@@ -63,9 +64,14 @@ export class PermissionService {
   /**
    * @returns true when `member` satisfies the requirement.
    *
-   * The guild owner and administrators always pass Discord permission checks.
-   * That matches Discord's own semantics (the owner implicitly holds every
+   * The guild owner and administrators bypass *Discord* permission checks, which
+   * matches Discord's own semantics (the owner implicitly holds every
    * permission) and prevents locking an owner out of the bot.
+   *
+   * They do NOT bypass the named bot permission catalog: those are application
+   * rules the operator chooses, so an administrator is still subject to them
+   * unless the catalog says otherwise. This matters for a bot installed with
+   * `Administrator` — see `docs/PERMISSIONS.md`.
    */
   public can(member: GuildMember, requirement: PermissionRequirement = {}): boolean {
     return this.check(member, requirement).allowed;
@@ -86,7 +92,21 @@ export class PermissionService {
       };
     }
 
-    if (member.permissions.has(ADMINISTRATOR) || member.guild.ownerId === member.id) {
+    // Named bot permissions are application policy: verify them for everyone,
+    // including administrators.
+    const unknownBotPermissions = (resolved.botPermissions ?? []).filter(
+      (permission) => !isBotPermission(permission),
+    );
+    if (unknownBotPermissions.length > 0) {
+      return {
+        allowed: false,
+        missing: unknownBotPermissions,
+        reason: "The command requests an unknown bot permission.",
+      };
+    }
+
+    // Discord permissions are bypassed by administrators and the guild owner.
+    if (this.bypassesDiscordChecks(member)) {
       return ALLOWED;
     }
 
@@ -101,18 +121,17 @@ export class PermissionService {
       };
     }
 
-    const unknownBotPermissions = (resolved.botPermissions ?? []).filter(
-      (permission) => !isBotPermission(permission),
-    );
-    if (unknownBotPermissions.length > 0) {
-      return {
-        allowed: false,
-        missing: unknownBotPermissions,
-        reason: "The command requests an unknown bot permission.",
-      };
-    }
-
     return ALLOWED;
+  }
+
+  /**
+   * @returns true when the member holds `Administrator` or owns the guild.
+   *
+   * Exposed so that future modules can log privileged actions distinctly: an
+   * administrator acting through the bot is an audit-worthy event.
+   */
+  public bypassesDiscordChecks(member: GuildMember): boolean {
+    return member.permissions.has(ADMINISTRATOR) || member.guild.ownerId === member.id;
   }
 
   /** Verifies the bot can actually act in the guild/channel it was invoked in. */
@@ -171,6 +190,26 @@ export class PermissionService {
   /** Checks a bot permission directly (used for custom overrides later). */
   public canBotPermission(member: GuildMember, permission: BotPermission): boolean {
     return this.can(member, { botPermissions: [permission] });
+  }
+
+  /**
+   * @returns the critical Discord permissions the bot is missing in a guild.
+   *
+   * Used by the startup self-check and `/admin permissions`: an operator should
+   * learn *what* is missing rather than watching a feature fail silently when
+   * Discord rejects an action. Administrators are never reported as missing
+   * anything.
+   */
+  public missingCriticalPermissions(bot: GuildMember): PermissionResolvable[] {
+    if (this.bypassesDiscordChecks(bot)) {
+      return [];
+    }
+    return CRITICAL_PERMISSIONS.filter((permission) => !bot.permissions.has(permission));
+  }
+
+  /** @returns true when the bot holds `Administrator` in the guild. */
+  public isAdministrator(bot: GuildMember): boolean {
+    return bot.permissions.has(ADMINISTRATOR);
   }
 
   /** The bot's own member object, when available. */

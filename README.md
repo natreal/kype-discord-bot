@@ -295,14 +295,37 @@ which can take up to an hour to propagate.
 
 ---
 
+## Inviting the bot
+
+```bash
+npm run invite          # recommended (granular) permissions
+npm run invite:admin    # administrator profile, pre-selected guild
+```
+
+Both read the IDs from `.env` and print a pre-configured OAuth2 link with the
+`bot` and `applications.commands` scopes. See **[docs/PERMISSIONS.md](docs/PERMISSIONS.md)**
+for the two installation profiles, the reasoning behind each permission, and how
+the two-layer permission model works.
+
+Useful in-Discord tooling:
+
+| Command              | Purpose                                                     |
+| -------------------- | ----------------------------------------------------------- |
+| `/admin invite`      | Show the invite link for either profile                     |
+| `/admin permissions` | List critical permissions the bot is missing in this server |
+
+---
+
 ## Available commands
 
-| Command       | Category | Purpose                                        |
-| ------------- | -------- | ---------------------------------------------- |
-| `/ping`       | core     | Liveness, gateway latency and database latency |
-| `/about`      | core     | Version, environment, uptime, library versions |
-| `/help`       | utility  | Command reference generated from the registry  |
-| `/serverinfo` | utility  | Guild statistics plus stored bot configuration |
+| Command              | Category | Purpose                                                  |
+| -------------------- | -------- | -------------------------------------------------------- |
+| `/ping`              | core     | Liveness, gateway latency and database latency           |
+| `/about`             | core     | Version, environment, uptime, library versions           |
+| `/help`              | utility  | Command reference generated from the registry            |
+| `/serverinfo`        | utility  | Guild statistics plus stored bot configuration           |
+| `/admin invite`      | utility  | Pre-configured invite link for either permission profile |
+| `/admin permissions` | utility  | Critical permissions missing in this server              |
 
 ---
 

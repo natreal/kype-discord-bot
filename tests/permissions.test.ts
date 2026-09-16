@@ -12,7 +12,10 @@ import {
   PermissionService,
   botPermissionsForDiscord,
   isBotPermission,
+  permissionsForProfile,
+  CRITICAL_PERMISSIONS,
 } from "../../src/services/permissions/index.js";
+import { buildInviteLink, profilePermissionValue } from "../../src/utils/invite.js";
 import { PermissionError } from "../../src/utils/errors.js";
 import { memberStub } from "../helpers/discord.js";
 
@@ -80,6 +83,20 @@ describe("PermissionService.can", () => {
     expect(service.can(owner, { ownerOnly: true })).toBe(true);
   });
 
+  it("administrators bypass Discord checks but not application policy", () => {
+    const admin = memberStub({ permissions: [ADMIN] });
+
+    // Discord layer: bypassed, matching Discord's own semantics.
+    expect(service.can(admin, { discord: [BAN] })).toBe(true);
+    expect(service.bypassesDiscordChecks(admin)).toBe(true);
+
+    // Bot-permission layer: still validated, so an Administrator install cannot
+    // skip moderation/ticket policy that modules rely on.
+    expect(service.check(admin, { botPermissions: ["moderation.nuke" as never] }).allowed).toBe(
+      false,
+    );
+  });
+
   it("resolves bot permissions into Discord permission checks", () => {
     const allowed = memberStub({ permissions: [BAN] });
     const denied = memberStub({ permissions: [] });
@@ -117,5 +134,62 @@ describe("PermissionService.can", () => {
     ]);
     expect(service.requiredDiscordPermissions({ discord: [KICK] })).toEqual([KICK]);
     expect(service.requiredDiscordPermissions()).toEqual([]);
+  });
+});
+
+describe("installation profiles", () => {
+  const service = new PermissionService();
+
+  it("requests granular permissions in the recommended profile", () => {
+    const permissions = permissionsForProfile("recommended");
+
+    expect(permissions).not.toContain(PermissionFlagsBits.Administrator);
+    // Audit log access is mandatory: anti-nuke cannot attribute actions without it.
+    expect(permissions).toContain(PermissionFlagsBits.ViewAuditLog);
+    expect(permissions).toContain(PermissionFlagsBits.ManageRoles);
+    expect(permissions).toContain(PermissionFlagsBits.BanMembers);
+  });
+
+  it("requests Administrator only for the administrator profile", () => {
+    expect(permissionsForProfile("administrator")).toEqual([PermissionFlagsBits.Administrator]);
+  });
+
+  it("reports nothing missing for an administrator bot", () => {
+    const bot = memberStub({ permissions: [ADMIN] });
+    expect(service.missingCriticalPermissions(bot)).toEqual([]);
+    expect(service.isAdministrator(bot)).toBe(true);
+  });
+
+  it("reports the critical permissions a granular bot is missing", () => {
+    const bot = memberStub({ permissions: [PermissionFlagsBits.ManageChannels] });
+    const missing = service.missingCriticalPermissions(bot);
+
+    expect(missing).not.toContain(PermissionFlagsBits.ManageChannels);
+    expect(missing).toContain(PermissionFlagsBits.ViewAuditLog);
+    expect(missing.length).toBe(CRITICAL_PERMISSIONS.length - 1);
+  });
+
+  it("builds a pre-configured invite link with both required scopes", () => {
+    const link = new URL(
+      buildInviteLink({ clientId: "1549796559346991134", profile: "recommended" }),
+    );
+
+    expect(link.origin + link.pathname).toBe("https://discord.com/oauth2/authorize");
+    expect(link.searchParams.get("client_id")).toBe("1549796559346991134");
+    expect(link.searchParams.get("scope")).toBe("bot applications.commands");
+    expect(link.searchParams.get("permissions")).toBe(profilePermissionValue("recommended"));
+    expect(link.searchParams.get("guild_id")).toBeNull();
+  });
+
+  it("can pre-select a guild so Discord skips the server picker", () => {
+    const link = new URL(
+      buildInviteLink({
+        clientId: "1549796559346991134",
+        guildId: "1523780404337840290",
+      }),
+    );
+
+    expect(link.searchParams.get("guild_id")).toBe("1523780404337840290");
+    expect(link.searchParams.get("disable_guild_select")).toBe("true");
   });
 });

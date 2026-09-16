@@ -1,5 +1,14 @@
 export { BOT_PERMISSION_MAP, botPermissionsForDiscord } from "./permission-map.js";
 export {
+  ADMINISTRATOR_PERMISSIONS,
+  CRITICAL_PERMISSIONS,
+  INSTALL_PROFILES,
+  RECOMMENDED_PERMISSIONS,
+  describePermissions,
+  permissionsForProfile,
+  type InstallProfile,
+} from "./permission-profiles.js";
+export {
   PermissionService,
   resolveRequirement,
   type PermissionCheckResult,

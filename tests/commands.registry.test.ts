@@ -9,7 +9,7 @@ import { describe, expect, it } from "vitest";
 
 import { CommandRegistry } from "../../src/commands/command.registry.js";
 import { loadAndRegisterCommands } from "../../src/commands/command.loader.js";
-import { fromProjectRoot } from "../../src/utils/fs.js";
+import { modulesDirectory } from "../../src/utils/fs.js";
 import { testLogger } from "../helpers/logger.js";
 
 describe("CommandRegistry", () => {
@@ -35,7 +35,9 @@ describe("CommandRegistry", () => {
   it("registers the real foundation commands from src/commands", async () => {
     const registry = new CommandRegistry();
     const report = await loadAndRegisterCommands(registry, {
-      directory: fromProjectRoot("src", "commands"),
+      // The loader is pointed at the source tree, so development and production
+      // exercise the same discovery code path.
+      directory: modulesDirectory("commands"),
       logger: testLogger,
     });
 
@@ -45,13 +47,13 @@ describe("CommandRegistry", () => {
         .list()
         .map((command) => command.name)
         .sort(),
-    ).toEqual(["about", "help", "ping", "serverinfo"]);
+    ).toEqual(["about", "admin", "help", "ping", "serverinfo"]);
   });
 
   it("exposes the registry on the client", async () => {
     const registry = new CommandRegistry();
     await loadAndRegisterCommands(registry, {
-      directory: fromProjectRoot("src", "commands"),
+      directory: modulesDirectory("commands"),
       logger: testLogger,
     });
 
