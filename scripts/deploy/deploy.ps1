@@ -191,9 +191,26 @@ function Get-EnvValue {
   return $null
 }
 
+# `$ErrorActionPreference = "Stop"` turns the first line a native tool writes to
+# stderr into a terminating NativeCommandError -- and git, npm, pg_dump and
+# powershell all write ordinary progress there ("From https://...", "Switched to
+# branch", "dumping contents of table"). Capture with the preference relaxed so
+# the exit code stays the only thing that decides whether a step failed.
+function Invoke-Native {
+  param([scriptblock]$Command)
+  $previous = $ErrorActionPreference
+  $ErrorActionPreference = "Continue"
+  try {
+    $result = & $Command
+  } finally {
+    $ErrorActionPreference = $previous
+  }
+  return ,@($result)
+}
+
 function Invoke-Git {
   param([string[]]$Arguments, [switch]$AllowFailure)
-  $output = & git -C $ProjectDir @Arguments 2>&1
+  $output = Invoke-Native { & git -C $ProjectDir @Arguments 2>&1 }
   $code = $LASTEXITCODE
   foreach ($line in @($output)) {
     if ($null -ne $line) {
@@ -209,7 +226,7 @@ function Invoke-Git {
 function Invoke-Npm {
   param([string[]]$Arguments)
   Write-DeployLog ("==> npm " + ($Arguments -join " "))
-  & $script:NpmCmd @Arguments 2>&1 | ForEach-Object {
+  Invoke-Native { & $script:NpmCmd @Arguments 2>&1 } | ForEach-Object {
     Add-Content -Path $DeployLog -Value (Redact ([string]$_)) -Encoding UTF8
   }
   $code = $LASTEXITCODE
@@ -222,7 +239,7 @@ function Invoke-Botctl {
   param([string]$Command)
   Write-DeployLog "==> botctl $Command"
   if (-not (Test-Path $Botctl)) { throw "Missing $Botctl" }
-  $output = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $Botctl $Command 2>&1
+  $output = Invoke-Native { & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $Botctl $Command 2>&1 }
   $code = $LASTEXITCODE
   foreach ($line in @($output)) {
     Add-Content -Path $DeployLog -Value (Redact ([string]$line)) -Encoding UTF8
@@ -348,7 +365,7 @@ function Backup-Database {
       "--no-password",
       "--file=$file"
     )
-    & $pgDump @dumpArgs 2>&1 | ForEach-Object {
+    Invoke-Native { & $pgDump @dumpArgs 2>&1 } | ForEach-Object {
       Add-Content -Path $DeployLog -Value (Redact ([string]$_)) -Encoding UTF8
     }
     $code = $LASTEXITCODE
@@ -439,7 +456,7 @@ function Invoke-Preflight {
   }
   if (-not (Get-Command git -ErrorAction SilentlyContinue)) { throw "git is not on PATH." }
 
-  $nodeVersion = & node -v 2>&1
+  $nodeVersion = (Invoke-Native { & node -v 2>&1 }) -join " "
   if ($nodeVersion -notmatch '^v(\d+)\.') {
     throw "Could not determine the Node.js version (node -v returned '$nodeVersion')."
   }
