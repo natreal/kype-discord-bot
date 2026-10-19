@@ -131,7 +131,10 @@ through the same task, that a logon would start.
    after a stop — long enough to restart the bot in the middle of `npm ci`, but
    too soon to be noticed. The deploy creates its supported pause file
    (`C:\Users\natte\OpenClawConsole\watchdog.pause`) before stopping anything, and
-   removes it again in a `finally` — and only if this run created it.
+   removes it again in a `finally` — and, if it finds one already there, only
+   when that file is its own leftover from an interrupted run (its first line
+   says `paused by deploy.ps1`). A pause file with any other content is an
+   operator's pause and is left alone.
 5. **Graceful stop** — writes `.run\stop.request`; the bot's stop watcher runs
    the same shutdown path as `SIGTERM` (close gateway, drain database pool). The
    supervisor sees the marker and exits instead of restarting the bot. If the bot
@@ -271,7 +274,7 @@ PC is the second one, so backups work without adding anything to `PATH`.
 | "pg_dump was not found" in the log            | Install the PostgreSQL client tools or add their `bin` to `PATH`; the deploy continues without a backup      |
 | Bot restarts in the middle of a deploy        | The watchdog was not paused: check that it uses `watchdog.pause` in its folder, or pass `-WatchdogPauseFile` |
 | Watchdog log says the task is absent          | Re-create the bot task with `npm run bot:autostart` (the console watches that exact name)                    |
-| A pause file is left behind after a crash     | Delete `C:\Users\natte\OpenClawConsole\watchdog.pause`; a deploy only removes one it created                 |
+| A pause file is left behind after a crash     | Nothing to do: the next deploy recognises its own leftover and removes it; delete it yourself to re-arm the watchdog sooner |
 
 Useful checks:
 

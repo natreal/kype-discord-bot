@@ -483,7 +483,22 @@ function Suspend-Watchdog {
   if (-not $WatchdogPauseFile) { return $false }
   if (-not (Test-Path (Split-Path $WatchdogPauseFile -Parent))) { return $false }
   if (Test-Path $WatchdogPauseFile) {
-    Write-DeployLog "The workstation watchdog is already paused; leaving that as it is."
+    # The deploy lock guarantees no other deployment is running, so a pause file
+    # this script wrote can only be stale: the run that created it was killed
+    # before its finally block (Ctrl-C, a reboot, a timed-out task). Adopting it
+    # makes this run remove it, so the watchdog cannot stay paused for ever.
+    # Anything else in the file is an operator's pause and is left untouched.
+    $existing = ""
+    try {
+      $existing = [string](Get-Content -Path $WatchdogPauseFile -TotalCount 1 -ErrorAction Stop)
+    } catch {
+      $existing = ""
+    }
+    if ($existing -like "paused by deploy.ps1*") {
+      Write-DeployLog "Found a stale pause file from an interrupted deployment; it is removed when this run ends."
+      return $true
+    }
+    Write-DeployLog "The workstation watchdog is paused by someone else; leaving that as it is."
     return $false
   }
   try {
