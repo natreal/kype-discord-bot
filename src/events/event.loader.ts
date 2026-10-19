@@ -25,7 +25,15 @@ export interface EventLoadReport {
  * Everything else without a valid event export is treated as infrastructure too,
  * so this list only needs the files in the events root that must never load.
  */
-const INFRASTRUCTURE_FILES = ["index", "event.loader", "event.types"];
+const INFRASTRUCTURE_FILES = [
+  "index",
+  "event.loader",
+  "event.types",
+  // Shared formatting for the guild-log handlers. It exports helpers, not an event,
+  // so it must be skipped explicitly — the loader already tolerates a missing event
+  // export, but that would log a warning for a file that is behaving correctly.
+  "guild-log.helpers",
+];
 
 function isInfrastructureFile(id: string): boolean {
   return INFRASTRUCTURE_FILES.includes(id);

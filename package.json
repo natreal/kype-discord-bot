@@ -32,11 +32,31 @@
     "db:studio": "prisma studio",
     "deploy:commands": "tsx --env-file-if-exists=.env scripts/deploy-commands.ts",
     "db:smoke": "tsx --env-file-if-exists=.env scripts/db-smoke.ts",
+    "setup:resource-smoke": "tsx --env-file-if-exists=.env scripts/setup-resource-smoke.ts --cleanup",
     "setup:plan": "tsx --env-file-if-exists=.env scripts/setup.ts plan",
     "setup:run": "tsx --env-file-if-exists=.env scripts/setup.ts run",
+    "deploy:guilds": "tsx --env-file-if-exists=.env scripts/setup.ts deploy",
+    "deploy:missing": "tsx --env-file-if-exists=.env scripts/setup.ts deploy --missing",
+    "deploy:clear-guilds": "tsx --env-file-if-exists=.env scripts/clear-guild-commands.ts",
     "whoami": "tsx --env-file-if-exists=.env scripts/whoami.ts",
     "invite": "tsx --env-file-if-exists=.env scripts/invite.ts",
-    "invite:admin": "tsx --env-file-if-exists=.env scripts/invite.ts administrator --guild"
+    "invite:admin": "tsx --env-file-if-exists=.env scripts/invite.ts administrator --guild",
+    "bot:start": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/windows/botctl.ps1 start",
+    "bot:stop": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/windows/botctl.ps1 stop",
+    "bot:restart": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/windows/botctl.ps1 restart",
+    "bot:status": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/windows/botctl.ps1 status",
+    "bot:logs": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/windows/botctl.ps1 logs",
+    "bot:tail": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/windows/botctl.ps1 tail",
+    "bot:autostart": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/windows/register-autostart-task.ps1",
+    "bot:autostart:status": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/windows/register-autostart-task.ps1 -Status",
+    "bot:autostart:remove": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/windows/register-autostart-task.ps1 -Remove",
+    "deploy:auto": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/deploy/deploy.ps1",
+    "deploy:auto:force": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/deploy/deploy.ps1 -Force",
+    "deploy:auto:check": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/deploy/deploy.ps1 -CheckOnly",
+    "deploy:auto:status": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/deploy/deploy.ps1 -Status",
+    "deploy:task:install": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/deploy/register-deploy-task.ps1",
+    "deploy:task:remove": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/deploy/register-deploy-task.ps1 -Remove",
+    "deploy:task:status": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/deploy/register-deploy-task.ps1 -Status"
   },
   "dependencies": {
     "@prisma/adapter-pg": "^7.10.0",
@@ -56,5 +76,10 @@
     "typescript": "^5.9.3",
     "typescript-eslint": "^8.70.0",
     "vitest": "^4.1.0"
+  },
+  "allowScripts": {
+    "@prisma/engines@7.10.0": true,
+    "esbuild@0.28.2": true,
+    "prisma@7.10.0": true
   }
 }

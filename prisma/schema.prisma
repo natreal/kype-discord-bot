@@ -31,8 +31,248 @@ model Guild {
   automation      AutomationSettings?
   memberSettings  MemberSettings?
   setupRuns       SetupRun[]
+  setupResources  SetupResource[]
+  configSections  GuildConfigSection[]
+  configRevisions GuildConfigRevision[]
+  permissionClass PermissionClass[]
+  roleClasses     RolePermissionClass[]
+  moderationCases ModerationCase[]
+  moderationCounter GuildModerationCounter?
+  backupSnapshots BackupSnapshot[]
+  securityIncidents SecurityIncident[]
+  verifications VerificationPending[]
+  commandDeployments CommandDeployment[]
+  scheduledTasks  ScheduledTask[]
+  roleGrants      RoleGrant[]
+  roleMenus       RoleMenu[]
+  ticketCategories TicketCategory[]
+  ticketRecords   Ticket[]
+  reports         Report[]
+  welcomeSettings WelcomeSettings?
+  rulesAcknowledgements RulesAcknowledgement[]
+  automationRules AutomationRule[]
+  temporaryChannels TemporaryChannel[]
+  ticketTranscripts TicketTranscript[]
+  aiGuildMemory     AiGuildMemory[]
 
   @@map("guilds")
+}
+
+/// One moderation action, recorded for the lifetime of the guild.
+///
+/// This is the *history* of moderation, deliberately separate from the audit
+/// trail: `AuditEvent` records who did what to the bot's state, while a case is
+/// what a moderator did to a member, and `/history` reads it per target. Keeping
+/// them apart means neither has to be denormalized to satisfy the other.
+///
+/// Guarantees enforced by the schema:
+/// - `(guildId, caseNumber)` is unique, so the per-guild case sequence below
+///   cannot produce a duplicate even under concurrency, and a case number is
+///   stable forever once handed out;
+/// - `onDelete: Cascade` from `Guild`, so leaving a server leaves no orphaned
+///   moderation data behind (no cross-guild leak, and no unbounded retention);
+/// - `before`/`after` carry the *member state* (roles, ban state) around the
+///   action, which is what makes an action reversible and reviewable;
+/// - `expiresAt` is stored (not derived) so a later background sweeper can find
+///   expired temporary punishments with `WHERE expiresAt < now()`. Nothing in
+///   V4 runs that sweeper yet: `expiresAt` is written now precisely so that
+///   adding it later needs no migration and no write to existing rows.
+///
+/// `action` is a `String` rather than an enum on purpose: the action vocabulary
+/// is owned by the moderation module (`MODERATION_ACTIONS`), and adding an action
+/// there must not require a migration. Every write path validates it before it
+/// reaches this table.
+model ModerationCase {
+  id          String   @id @default(cuid())
+  guildId     String
+  /// Per-guild, gap-free sequence shown to moderators as `case #12`.
+  caseNumber  Int
+  /// Action identifier, mirrors `MODERATION_ACTIONS` (`ban`, `timeout`, ...).
+  action      String
+  /// The member the action applies to, when it is a *member* action.
+  targetId    String?
+  /// `member` or `guild`: distinguishes a punished member from guild-wide work.
+  targetType  String   @default("member")
+  /// A `MESSAGE` case (a purge) carries no member; `reason` describes the sweep.
+  moderatorId String
+  /// `user`, `system` or `god`, mirroring the audit trail's actor vocabulary.
+  moderatorKind String @default("user")
+  reason      String?
+  /// Punishment length, when the action is temporary.
+  durationMs  Int?
+  /// Absolute expiry, stored for the future sweeper described above.
+  expiresAt   DateTime?
+  /// Member state before the action (roles, ban state, ...).
+  before      Json?
+  /// Member state after the action, or what was removed (purge count, ...).
+  after       Json?
+  /// Action-specific extras (message count, timeout flag, source, ...).
+  details     Json?
+  /// Case this one reverses or amends (`unban` → the `ban` case, `unwarn` → the
+  /// `warn` case), so a history reads as a narrative rather than a flat list.
+  relatedCaseNumber Int?
+  createdAt   DateTime @default(now())
+
+  guild Guild @relation(fields: [guildId], references: [id], onDelete: Cascade)
+
+  @@unique([guildId, caseNumber])
+  @@index([guildId, targetId, createdAt])
+  @@index([guildId, action, createdAt])
+  @@index([guildId, createdAt])
+  @@map("moderation_cases")
+}
+
+/// Per-guild counter backing `ModerationCase.caseNumber`.
+///
+/// A counter row (rather than `MAX(caseNumber) + 1`) because two moderators can
+/// act at the same moment: a `MAX` query then hands both the same number, and the
+/// unique constraint turns the second action into a failed ban. This row is
+/// incremented with an atomic `UPDATE ... SET value = value + 1 RETURNING value`
+/// inside the same transaction as the case insert, which serializes case creation
+/// per guild, and only per guild: two servers never contend with each other.
+model GuildModerationCounter {
+  id        String   @id @default(cuid())
+  guildId   String   @unique
+  /// Last case number handed out in this guild. Starts at 0.
+  value     Int      @default(0)
+  updatedAt DateTime @updatedAt
+
+  guild Guild @relation(fields: [guildId], references: [id], onDelete: Cascade)
+
+  @@map("guild_moderation_counters")
+}
+
+/// Guild configuration, one row per *section* (`language`, `logging`, `moderation`, ...).
+///
+/// V3 stores configuration per section rather than as one opaque blob so that:
+/// - a module can own and validate its own section without a schema migration;
+/// - the generic key/value store (`GuildSettings.modules`) stays valid for V1/V2
+///   compatibility while V3 reads through the repository below;
+/// - `updatedBy` records who last changed a section, which the audit trail needs.
+///
+/// `(guildId, section)` is unique, so two concurrent writers cannot create the
+/// same section twice. Section values are validated by Zod *before* they are
+/// written, so a stored value is never trusted blindly.
+model GuildConfigSection {
+  id        String   @id @default(cuid())
+  guildId   String
+  /// Section name, e.g. `moderation`. Mirrors the `GuildConfig` keys.
+  section   String
+  /// Validated section payload. Never contains secrets.
+  value     Json     @default("{}")
+  /// Discord user ID of the last writer, when known.
+  updatedBy String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  guild Guild @relation(fields: [guildId], references: [id], onDelete: Cascade)
+
+  @@unique([guildId, section])
+  @@map("guild_config_sections")
+}
+
+/// Append-only revision log of configuration writes.
+///
+/// Deliberately separate from the generic audit trail: configuration history is
+/// read frequently (diffing a section before/after) and must survive audit
+/// retention policies, while still being guild-scoped and cascade-deleted.
+model GuildConfigRevision {
+  id        String   @id @default(cuid())
+  guildId   String
+  section   String
+  /// Section value before the write, or `null` when the section did not exist.
+  before    Json?
+  /// Section value after the write.
+  after     Json
+  /// Actor responsible, when known (`null` for automatic writes).
+  actorId   String?
+  /// Actor kind: `user`, `system` or `god`.
+  actorKind String   @default("user")
+  createdAt DateTime @default(now())
+
+  guild Guild @relation(fields: [guildId], references: [id], onDelete: Cascade)
+
+  @@index([guildId, createdAt])
+  @@map("guild_config_revisions")
+}
+
+/// A named permission class: the V3 role/permission mapping unit.
+///
+/// A class bundles structured permission identifiers (see
+/// `src/services/authorization/permissions.ts`) and is bound to Discord roles
+/// through `RolePermissionClass`. Built-in classes (`owner`, `administrator`,
+/// ...) are seeded per guild on demand; custom classes are a later feature, so
+/// only the mechanism exists here.
+model PermissionClass {
+  id          String   @id @default(cuid())
+  guildId     String
+  /// Stable identifier within the guild, e.g. `senior-moderator`.
+  key         String
+  name        String
+  /// Permission identifiers granted by the class, e.g. `["moderation.ban"]`.
+  permissions Json     @default("[]")
+  /// Built-in classes cannot be deleted or renamed through commands.
+  builtIn     Boolean  @default(false)
+  /// Higher priority wins when a user matches several classes.
+  priority    Int      @default(0)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  guild Guild @relation(fields: [guildId], references: [id], onDelete: Cascade)
+
+  @@unique([guildId, key])
+  @@index([guildId, priority])
+  @@map("permission_classes")
+}
+
+/// Binds a Discord role to a permission class.
+///
+/// Stored separately from the class so one class can cover several roles (the
+/// normal case: a server has `Moderator` and `Modo`), and so a binding can be
+/// added or removed without touching the class definition.
+model RolePermissionClass {
+  id        String   @id @default(cuid())
+  guildId   String
+  roleId    String
+  classKey  String
+  createdAt DateTime @default(now())
+
+  guild Guild @relation(fields: [guildId], references: [id], onDelete: Cascade)
+
+  @@unique([guildId, roleId, classKey])
+  @@index([guildId, roleId])
+  @@map("role_permission_classes")
+}
+
+/// Structured audit trail for privileged and configuration-changing actions.
+///
+/// One row answers who / what / when / guild / target / before / after / result
+/// without joining anything. `details` carries action-specific extras, and writes
+/// are best-effort: a failed audit insert is logged and never breaks the action
+/// it was recording (the same rule the setup run trail already follows).
+model AuditEvent {
+  id         String   @id @default(cuid())
+  guildId    String?
+  /// Action identifier, e.g. `config.set` or `setup.repair`.
+  action     String
+  /// Emitting subsystem (`config`, `authorization`, `setup`, `diagnostics`).
+  category   String
+  /// Severity: `info`, `warn` or `privileged`.
+  severity   String   @default("info")
+  actorId    String?
+  /// Actor kind: `user`, `system` or `god`.
+  actorKind  String   @default("system")
+  targetType String?
+  targetId   String?
+  outcome    String   @default("success")
+  before     Json?
+  after      Json?
+  details    Json?
+  createdAt  DateTime @default(now())
+
+  @@index([guildId, createdAt])
+  @@index([action, createdAt])
+  @@map("audit_events")
 }
 
 /// Generic, guild-scoped key/value configuration store.
@@ -155,22 +395,647 @@ model MemberSettings {
 /// Setup is idempotent: resources that already exist are reused, and every run
 /// is recorded here so that a future setup wizard can report what happened.
 model SetupRun {
-  id          String   @id @default(cuid())
-  guildId     String
-  scope       String
-  status      String
-  created     Int      @default(0)
-  reused      Int      @default(0)
-  updated     Int      @default(0)
-  skipped     Int      @default(0)
-  failed      Int      @default(0)
-  details     Json     @default("[]")
-  startedAt   DateTime @default(now())
-  finishedAt  DateTime?
-  durationMs  Int?
+  id         String    @id @default(cuid())
+  guildId    String
+  scope      String
+  status     String
+  created    Int       @default(0)
+  reused     Int       @default(0)
+  updated    Int       @default(0)
+  skipped    Int       @default(0)
+  failed     Int       @default(0)
+  details    Json      @default("[]")
+  startedAt  DateTime  @default(now())
+  finishedAt DateTime?
+  durationMs Int?
 
   guild Guild @relation(fields: [guildId], references: [id], onDelete: Cascade)
 
   @@index([guildId, startedAt])
   @@map("setup_runs")
 }
+
+/// Resource type created or adopted by the automatic setup system.
+///
+/// Only the kinds of resource setup actually manages exist here. Voice channels
+/// and other types are added when a module needs them, never pre-emptively.
+enum SetupResourceType {
+  CATEGORY
+  TEXT_CHANNEL
+  VOICE_CHANNEL
+  ROLE
+}
+
+/// Identity of a resource owned by the automatic setup system.
+///
+/// Setup never identifies its resources by name: administrators rename channels,
+/// and two guilds can legitimately have a `#welcome`. The Discord ID is the
+/// source of truth, and `(guildId, key)` is the stable identity of the *logical*
+/// resource ("the welcome channel of this guild").
+///
+/// Guarantees enforced by the schema:
+/// - `(guildId, key)` is unique, so concurrent setup runs cannot register the
+///   same logical resource twice;
+/// - deleting a guild cascades, so no orphaned setup state survives.
+///
+/// `discordId` is stored as text (not a FK) on purpose: Discord snowflakes live
+/// in another system, and a deleted channel must be recorded as *stale* rather
+/// than cascade-deleted.
+model SetupResource {
+  id        String            @id @default(cuid())
+  guildId   String
+  /// Stable logical key, e.g. `information.welcome`.
+  key       String
+  type      SetupResourceType
+  /// Discord snowflake of the resource, or `null` while it is unresolved.
+  discordId String?
+  /// Last known name, used to recognise a renamed resource during recovery.
+  name      String?
+  /// Module-specific extras (topic, parent key, ...). Never trusted blindly.
+  config    Json              @default("{}")
+  createdAt DateTime          @default(now())
+  updatedAt DateTime          @updatedAt
+
+  guild Guild @relation(fields: [guildId], references: [id], onDelete: Cascade)
+
+  @@unique([guildId, key])
+  @@index([guildId, type])
+  @@map("setup_resources")
+}
+
+/// One restorable snapshot of a guild's structure and configuration (V5).
+///
+/// The security module detects a nuke and stops it, but it cannot *repair* what
+/// was already destroyed — a deleted channel is gone. A backup is the other half
+/// of that story: what anti-nuke cannot undo, `/backup restore` can rebuild from
+/// a snapshot.
+///
+/// Guarantees enforced by the schema:
+/// - `(guildId, id)` is inherently scoped: a snapshot row belongs to exactly one
+///   guild and carries the `guildId` it was taken from, so a restore can never
+///   read another guild's data;
+/// - `onDelete: Cascade` from `Guild`, so leaving a server leaves nothing behind;
+/// - `payload` holds the *structure* (roles, channels, their permission
+///   overwrites and the relevant configuration sections), never member data;
+/// - `checksum` lets a restore refuse a row that was truncated or edited rather
+///   than half-rebuilding a server from a corrupt snapshot.
+model BackupSnapshot {
+  id        String   @id @default(cuid())
+  guildId   String
+  /// `manual` (a `/backup create`) or `scheduled` (the periodic snapshot worker).
+  kind      String   @default("manual")
+  /// `complete` once the payload was fully written. `partial` when a step failed.
+  status    String   @default("complete")
+  /// Structural payload: roles, channels, overwrites and configuration sections.
+  payload   Json     @default("{}")
+  /// Number of roles / channels captured, for `/backup list` without a payload read.
+  roleCount    Int   @default(0)
+  channelCount Int   @default(0)
+  /// SHA-256 of the canonical payload, checked before a restore.
+  checksum  String?
+  /// Discord user ID that requested the snapshot, or `system`.
+  createdBy String   @default("system")
+  createdAt DateTime @default(now())
+
+  guild Guild @relation(fields: [guildId], references: [id], onDelete: Cascade)
+
+  @@index([guildId, createdAt])
+  @@map("backup_snapshots")
+}
+
+/// Per-guild record of the last successful slash-command deployment.
+///
+/// This is what makes automatic deployment *cheap*. A bot in a few hundred
+/// servers must not call Discord once per guild on every boot just to find out
+/// which servers still need a deploy: it compares the fingerprint of the command
+/// payload it is running against the fingerprint it last published, and only
+/// touches servers whose record is missing or different.
+///
+/// Guarantees:
+/// - `(guildId)` is unique, so a guild has exactly one deployment record;
+/// - `onDelete: Cascade` from `Guild`, so leaving a server leaves nothing behind,
+///   and a re-invite is correctly treated as "never deployed" and redeployed;
+/// - `fingerprint` is a hash of the deployed payload (names, descriptions,
+///   options), so a *content* change to a command is detected, not only an added
+///   or removed command. `commandCount` alone would miss an edited option.
+model CommandDeployment {
+  id          String   @id @default(cuid())
+  guildId     String   @unique
+  /// SHA-256 of the canonical command payload that was published.
+  fingerprint String
+  /// Number of commands in that payload, for display without a fingerprint compare.
+  commandCount Int     @default(0)
+  /// Where the last successful deployment to this guild happened from:
+  /// `startup`, `guildCreate`, `manual` or `script`.
+  source      String   @default("startup")
+  deployedAt  DateTime @default(now())
+
+  guild Guild @relation(fields: [guildId], references: [id], onDelete: Cascade)
+
+  @@index([guildId, deployedAt])
+  @@map("command_deployments")
+}
+
+/// Tracks whether a guild is in an active raid / lockdown episode.
+///
+/// Kept in the database rather than in memory for one reason: a restart during a
+/// raid must not silently lift the lockdown, and a recovery has to survive the
+/// process that started it. `expiresAt` is what makes the recovery automatic —
+/// the sweeper lifts the lockdown once the threat window has passed, without a
+/// human having to remember.
+model SecurityIncident {
+  id         String    @id @default(cuid())
+  guildId    String
+  /// `raid` or `nuke`.
+  kind       String
+  /// `active` while the lockdown / containment is in force.
+  status     String    @default("active")
+  /// Human-readable summary shown in the security log and `/security status`.
+  summary    String
+  /// Snapshot of the observations that triggered the incident.
+  details    Json      @default("{}")
+  /// Accounts quarantined or stripped as part of the response.
+  targetedIds Json     @default("[]")
+  startedAt  DateTime  @default(now())
+  expiresAt  DateTime?
+  resolvedAt DateTime?
+  /// `automatic` when the recovery sweep closed it, otherwise the actor ID.
+  resolvedBy String?
+
+  guild Guild @relation(fields: [guildId], references: [id], onDelete: Cascade)
+
+  @@index([guildId, status])
+  @@index([guildId, startedAt])
+  @@map("security_incidents")
+}
+
+/// Per-guild state of the automatic verification workflow.
+///
+/// `verify` restricts a new member to the `Quarantined` role until they confirm.
+/// Storing the pending state (rather than assuming every newcomer is pending)
+/// means a member who verifies is never re-quarantined, and a member who never
+/// does can be swept later.
+model VerificationPending {
+  id        String   @id @default(cuid())
+  guildId   String
+  userId    String
+  /// The role the member was quarantined with, so recovery restores exactly it.
+  roleId    String?
+  /// `pending`, `verified` or `expired`.
+  status    String   @default("pending")
+  /// Why they were quarantined: `raid`, `new-account`, `suspicious-name` or `manual`.
+  reason    String
+  createdAt DateTime @default(now())
+  verifiedAt DateTime?
+
+  guild Guild @relation(fields: [guildId], references: [id], onDelete: Cascade)
+
+  @@unique([guildId, userId])
+  @@index([guildId, status])
+  @@map("verification_pending")
+}
+
+/// One unit of deferred work (V6).
+///
+/// This is the *only* place a future action is stored. The brief is explicit that
+/// temporary roles, temporary channels, reminders and the automation engine's
+/// delayed actions must share one mechanism rather than each owning a timer, and
+/// a table is what makes that true: a task survives a restart, is visible to an
+/// operator, and is executed by exactly one worker.
+///
+/// Why a table and not an in-memory timer:
+/// - a temporary role whose removal lived in RAM would be permanent after a
+///   restart, which is the failure mode the whole feature exists to avoid;
+/// - a `dueAt` index makes "what is due now?" a single indexed query, so the
+///   worker costs the same whether a guild has ten tasks or ten thousand;
+/// - `kind` is a `String`, not an enum: the task vocabulary is owned by the
+///   module that registers a handler, and adding one must not require a migration.
+///
+/// `(guildId, dedupeKey)` is unique so a task that must exist at most once (the
+/// expiry of a given role grant, for example) can be upserted instead of
+/// accumulated by repeated triggers.
+model ScheduledTask {
+  id       String   @id @default(cuid())
+  guildId  String
+  /// Task type, e.g. `role.expire` or `reminder.fire`. Owned by a handler registry.
+  kind     String
+  /// When the task becomes due. Indexed together with `status`.
+  dueAt    DateTime
+  /// Handler-specific payload, validated by the handler before it is used.
+  payload  Json     @default("{}")
+  /// `pending`, `running`, `done`, `failed` or `cancelled`.
+  status   String   @default("pending")
+  /// Recurrence rule for a repeating task, `null` for a one-shot task.
+  /// Shape: `{ "everySeconds": 3600 }` — interpreted by the scheduler, never free text.
+  recurrence Json?
+  /// Optional identity that makes a task idempotent per guild, e.g. `role:<grantId>`.
+  dedupeKey String?
+  /// Number of execution attempts, so a poison task is abandoned rather than retried forever.
+  attempts  Int      @default(0)
+  /// Last failure, kept for the operator. Never rendered to Discord unchanged.
+  lastError String?
+  /// Set once the task succeeds, is cancelled or is abandoned.
+  completedAt DateTime?
+  createdAt DateTime @default(now())
+
+  guild Guild @relation(fields: [guildId], references: [id], onDelete: Cascade)
+
+  @@unique([guildId, dedupeKey])
+  @@index([status, dueAt])
+  @@index([guildId, status])
+  @@map("scheduled_tasks")
+}
+
+/// One role grant the bot made, and its lifetime (V6).
+///
+/// This is what makes a *temporary* role honest. The grant is recorded when the
+/// role is given, and `expiresAt` (plus the `role.expire` scheduled task keyed on
+/// this row) is what removes it. Storing the grant rather than deriving it means:
+/// - a restart does not leave a role granted forever;
+/// - `/role list` can answer "who has what, and until when" without guessing;
+/// - a revoke is recorded even when the role was removed by hand first.
+///
+/// `source` records *why* the role was granted (reaction, button, menu, temp,
+/// welcome, automation), so an operator can tell a self-service role from an
+/// automated one, and the same table serves every V6 role surface.
+model RoleGrant {
+  id        String   @id @default(cuid())
+  guildId   String
+  userId    String
+  roleId    String
+  /// `reaction`, `button`, `menu`, `temporary`, `welcome` or `automation`.
+  source    String
+  /// The menu/option that produced the grant, when there was one.
+  menuId    String?
+  /// Discord user ID or `system:<name>` that performed the grant.
+  grantedBy String
+  /// `active`, `expired` or `revoked`.
+  status    String   @default("active")
+  /// Set for a temporary grant; `null` means the role stays until revoked.
+  expiresAt DateTime?
+  createdAt DateTime @default(now())
+  revokedAt DateTime?
+  revokedBy String?
+
+  guild Guild @relation(fields: [guildId], references: [id], onDelete: Cascade)
+
+  @@index([guildId, userId, status])
+  @@index([guildId, status, expiresAt])
+  @@map("role_grants")
+}
+
+/// A self-service role menu: the message members click (V6).
+///
+/// One row is one published panel. `mode` decides the component Discord renders
+/// (buttons, a single-select menu, or a multi-select menu), which is why it is
+/// stored rather than inferred: the same options produce different components and
+/// the operator chooses the behaviour.
+model RoleMenu {
+  id        String   @id @default(cuid())
+  guildId   String
+  channelId String
+  /// Message the panel was posted as, once published. Null until it is posted.
+  messageId String?
+  /// Stable slug used in component custom IDs, unique per guild.
+  key       String
+  title     String
+  description String?
+  /// `buttons`, `select` or `select-multi`.
+  mode      String
+  /// `unique` clears other options of the same menu, `toggle` adds and removes.
+  behaviour String   @default("toggle")
+  enabled   Boolean  @default(true)
+  createdBy String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  guild   Guild            @relation(fields: [guildId], references: [id], onDelete: Cascade)
+  options RoleMenuOption[]
+
+  @@unique([guildId, key])
+  @@index([guildId, enabled])
+  @@map("role_menus")
+}
+
+/// One role/emoji pair offered by a role menu (V6).
+model RoleMenuOption {
+  id         String   @id @default(cuid())
+  menuId     String
+  roleId     String
+  /// Button label, or the select option's label.
+  label      String
+  /// Optional emoji shown on the button/option. A unicode emoji or a snowflake.
+  emoji      String?
+  /// Optional description, used by select menus only.
+  description String?
+  position   Int      @default(0)
+
+  menu RoleMenu @relation(fields: [menuId], references: [id], onDelete: Cascade)
+
+  @@unique([menuId, roleId])
+  @@index([menuId, position])
+  @@map("role_menu_options")
+}
+
+/// A ticket category: the button on the panel and who may handle it (V6).
+///
+/// The category owns its own staff roles and its own Discord category, which is
+/// what makes "permissions per ticket category" (the brief's requirement) a data
+/// question rather than a hardcoded one.
+model TicketCategory {
+  id          String   @id @default(cuid())
+  guildId     String
+  /// Stable slug used in component custom IDs, unique per guild.
+  key         String
+  label       String
+  /// Emoji on the panel button.
+  emoji       String?
+  /// Long description shown in the panel, and as the ticket channel topic.
+  description String?
+  /// Discord category newly created ticket channels are placed in. Nullable so a
+  /// category can be configured before the Discord category exists.
+  parentId    String?
+  /// Staff roles allowed to see and claim tickets of this category.
+  staffRoleIds String[] @default([])
+  /// Staff roles notified when a ticket opens. Defaults to `staffRoleIds`.
+  pingRoleIds  String[] @default([])
+  /// Opening question asked before the ticket is created, when set.
+  prompt      String?
+  enabled     Boolean  @default(true)
+  position    Int      @default(0)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  guild   Guild    @relation(fields: [guildId], references: [id], onDelete: Cascade)
+  tickets Ticket[]
+
+  @@unique([guildId, key])
+  @@index([guildId, enabled])
+  @@map("ticket_categories")
+}
+
+/// One ticket (V6).
+///
+/// A ticket is a *record*, and the Discord channel is its current home: the row
+/// survives the channel so `/ticket reopen` and the statistics both work after a
+/// close. `closedAt` and `firstResponseAt` are stored rather than derived so
+/// "time to first response" and "time to resolution" are computed from what
+/// actually happened, not from a re-read of a channel that may be gone.
+model Ticket {
+  id          String   @id @default(cuid())
+  guildId     String
+  /// Human-facing counter shown as `ticket #12`, per guild and gap-free.
+  number      Int
+  categoryId  String
+  channelId   String
+  openerId    String
+  /// Staff member who claimed it, if any.
+  claimedById String?
+  /// `open`, `closed` or `deleted`.
+  status      String   @default("open")
+  /// `low`, `normal`, `high` — reused by reports, kept here for the panel.
+  priority    String   @default("normal")
+  subject     String?
+  /// When the first staff reply happened, for the response-time statistic.
+  firstResponseAt DateTime?
+  closedAt    DateTime?
+  closedById  String?
+  closeReason String?
+  /// Denormalized message count, so statistics do not need the transcript.
+  messageCount Int     @default(0)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  guild    Guild          @relation(fields: [guildId], references: [id], onDelete: Cascade)
+  category TicketCategory @relation(fields: [categoryId], references: [id], onDelete: Cascade)
+
+  @@unique([guildId, number])
+  @@index([guildId, status])
+  @@index([guildId, categoryId, status])
+  @@index([guildId, openerId])
+  @@map("tickets")
+}
+
+/// A ticket transcript, stored as text (V6).
+///
+/// Kept in the database rather than only as an attachment because it is the
+/// evidence a moderator reads months later, and an attachment in a closed channel
+/// is one channel deletion away from being gone. `checksum` detects a truncated
+/// or hand-edited row, the same property `backup_snapshots` relies on.
+model TicketTranscript {
+  id           String   @id @default(cuid())
+  ticketId     String   @unique
+  guildId      String
+  /// Rendered transcript (HTML or Markdown, per `format`).
+  content      String
+  /// `markdown` or `html`.
+  format       String   @default("markdown")
+  messageCount Int      @default(0)
+  checksum     String
+  createdAt    DateTime @default(now())
+
+  guild Guild @relation(fields: [guildId], references: [id], onDelete: Cascade)
+
+  @@index([guildId, createdAt])
+  @@map("ticket_transcripts")
+}
+
+/// A staff report, from `/report` (V6).
+///
+/// `priority` is deliberately basic (the brief excludes AI classification, which
+/// is V7): it is set by the reporter and adjustable by staff, and the queue is
+/// ordered by it. Nothing here predicts anything.
+model Report {
+  id             String   @id @default(cuid())
+  guildId        String
+  /// Per-guild, gap-free counter shown as `report #7`.
+  number         Int
+  /// `user`, `message`, `bug` or `server`.
+  kind           String
+  reporterId     String
+  /// The reported user, when the report is about a member.
+  targetUserId   String?
+  /// The reported message (ID) and its channel, for a message report.
+  targetMessageId String?
+  targetChannelId String?
+  /// Free-text description supplied by the reporter.
+  summary        String
+  /// `low`, `normal`, `high` or `urgent`.
+  priority       String   @default("normal")
+  /// `open`, `claimed`, `resolved` or `dismissed`.
+  status         String   @default("open")
+  claimedById    String?
+  resolution     String?
+  resolvedById   String?
+  resolvedAt     DateTime?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  guild Guild @relation(fields: [guildId], references: [id], onDelete: Cascade)
+
+  @@unique([guildId, number])
+  @@index([guildId, status, priority])
+  @@index([guildId, reporterId])
+  @@map("reports")
+}
+
+/// Welcome / leave configuration, one row per guild (V6).
+///
+/// Stored as a table rather than in the config JSON because it carries settings
+/// that are edited from several surfaces, and because a welcome message and a
+/// leave message are two independent messages, not one toggle.
+model WelcomeSettings {
+  id                String   @id @default(cuid())
+  guildId           String   @unique
+  /// Welcome message channel. `null` disables the public welcome.
+  welcomeChannelId  String?
+  /// Welcome text. Supports the same placeholders as the DM template.
+  welcomeMessage    String   @default("Welcome {user} to {guild}!")
+  /// Whether members get a welcome DM.
+  welcomeDmEnabled  Boolean  @default(false)
+  welcomeDmMessage  String   @default("Welcome to {guild}, {user}!")
+  /// Leave message channel. `null` disables the public leave notice.
+  leaveChannelId    String?
+  leaveMessage      String   @default("{user} left {guild}.")
+  /// Roles granted on arrival, in addition to the members module's auto roles.
+  autoRoleIds       String[] @default([])
+  /// A role held until the member acknowledges the rules, when set.
+  unverifiedRoleId  String?
+  /// The rules message members acknowledge. Held as text so acknowledgement does
+  /// not depend on a message that may be deleted.
+  rulesMessage      String?
+  updatedAt         DateTime @updatedAt
+
+  guild Guild @relation(fields: [guildId], references: [id], onDelete: Cascade)
+
+  @@map("welcome_settings")
+}
+
+/// One rules acknowledgement, so a member is never asked twice (V6).
+model RulesAcknowledgement {
+  id        String   @id @default(cuid())
+  guildId   String
+  userId    String
+  roleId    String?
+  createdAt DateTime @default(now())
+
+  guild Guild @relation(fields: [guildId], references: [id], onDelete: Cascade)
+
+  @@unique([guildId, userId])
+  @@map("rules_acknowledgements")
+}
+
+/// One automation rule: WHEN → (IF) → THEN (V6).
+///
+/// The single most sensitive object in V6, and the schema reflects that:
+/// - `trigger`, `conditions` and `actions` are JSON, but every value in them is a
+///   *key from a closed registry* (`automation-triggers.ts`,
+///   `automation-conditions.ts`, `automation-actions.ts`), validated on write.
+///   There is no free-form expression language, by explicit decision: unparseable
+///   logic in a moderation path is worse than no automation.
+/// - `enabled` is separate from any module switch so a rule can be disabled
+///   without deleting it, which is what an operator actually needs during an
+///   incident.
+model AutomationRule {
+  id          String   @id @default(cuid())
+  guildId     String
+  name        String
+  description String?
+  /// Trigger key and its parameters, from the closed trigger registry.
+  trigger     Json
+  /// AND-ed conditions. Empty means "always".
+  conditions  Json     @default("[]")
+  /// Ordered actions, each validated against the action registry.
+  actions     Json     @default("[]")
+  enabled     Boolean  @default(true)
+  /// `user` or `system` that created the rule.
+  createdBy   String
+  /// Number of times the rule has fired, for the operator.
+  fireCount   Int      @default(0)
+  lastFiredAt DateTime?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  guild Guild @relation(fields: [guildId], references: [id], onDelete: Cascade)
+
+  @@unique([guildId, name])
+  @@index([guildId, enabled])
+  @@map("automation_rules")
+}
+
+/// A temporary channel created on demand (V6).
+///
+/// Shares the scheduler with temporary roles: `expiresAt` mirrors the
+/// `channel.expire` task, so an empty channel is reclaimed by the same worker that
+/// removes an expired role.
+model TemporaryChannel {
+  id        String   @id @default(cuid())
+  guildId   String
+  channelId String
+  ownerId   String
+  /// `voice` or `text`.
+  kind      String
+  expiresAt DateTime?
+  status    String   @default("active")
+  createdAt DateTime @default(now())
+
+  guild Guild @relation(fields: [guildId], references: [id], onDelete: Cascade)
+
+  @@index([guildId, status, expiresAt])
+  @@map("temporary_channels")
+}
+
+/// A guild-scoped memory entry for the AI assistant (V7).
+///
+/// Memory is deliberately small and namespaced: the assistant can store a short
+/// fact under a (kind, key) pair and recall it, never an unbounded conversation
+/// transcript. `kind` separates policy ("user", "project") from ephemera so the
+/// assistant can reason about *what* it remembers. The service enforces the entry
+/// and length bounds, not the schema, so those bounds are testable off-DB.
+model AiGuildMemory {
+  id        String   @id @default(cuid())
+  guildId   String
+  /// A coarse namespace, e.g. `user`, `project`, `rule`.
+  kind      String
+  /// Human-readable key within `kind`, e.g. `welcome-instructions`.
+  key       String
+  /// The stored text; length-bounded by the service.
+  content   String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  guild Guild @relation(fields: [guildId], references: [id], onDelete: Cascade)
+
+  @@unique([guildId, kind, key])
+  @@index([guildId, kind])
+  @@map("ai_guild_memory")
+}
+
+/// Global, runtime-editable AI provider settings (V7, God Access only).
+///
+/// This is the single deployment-wide row that lets the owner configure the AI
+/// provider from Discord instead of `.env`. It is a singleton: `key` is a fixed
+/// sentinel (`"global"`), so there is exactly one row. `.env` remains the source
+/// of *initial* defaults; a value stored here overrides it at runtime.
+///
+/// The API key is a credential: it is written here so it survives restarts and
+/// updates, but it is **never read back in the clear** — the service projects it
+/// as `[redacted]` and only the provider transport ever sees the raw value.
+model AiProviderSettings {
+  id                String   @id @default(cuid())
+  key               String   @unique
+  baseUrl           String?
+  apiKey            String?
+  modelFast         String?
+  modelSmart        String?
+  dailyTokenBudget  Int      @default(0)
+  requestTimeoutMs  Int      @default(20000)
+  defaultTrigger    String?
+  persona           String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@map("ai_provider_settings")
+}
+

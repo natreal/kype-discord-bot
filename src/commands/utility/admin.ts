@@ -5,12 +5,13 @@
  * (`/admin permissions`, `/admin setup`, ...); for V1 it exposes the invite link
  * so an install can always be corrected without leaving Discord.
  */
-import { SlashCommandBuilder } from "discord.js";
+import { SlashCommandBuilder, type ChatInputCommandInteraction } from "discord.js";
 
 import { defineSlashCommand } from "../define.js";
 import { buildInviteLink, profilePermissionValue } from "../../utils/invite.js";
-import { brandedEmbed } from "../../utils/presenters.js";
+import { brandedEmbed, errorEmbed } from "../../utils/presenters.js";
 import { INSTALL_PROFILES } from "../../services/permissions/index.js";
+import type { CommandExecutionContext } from "../context.js";
 
 export default defineSlashCommand({
   meta: {
@@ -21,7 +22,7 @@ export default defineSlashCommand({
   botPermissions: ["core.settings"],
   data: new SlashCommandBuilder()
     .setName("admin")
-    .setDescription("Operator tools: invite links and installation diagnostics.")
+    .setDescription("Operator tools: invite links, installation and command deployment.")
     .addSubcommand((subcommand) =>
       subcommand
         .setName("invite")
@@ -37,6 +38,16 @@ export default defineSlashCommand({
       subcommand
         .setName("permissions")
         .setDescription("Check the bot's permissions in this server."),
+    )
+    .addSubcommand((subcommand) =>
+      subcommand
+        .setName("deploy")
+        .setDescription("Register this bot's commands in this server, right now.")
+        .addBooleanOption((option) =>
+          option
+            .setName("force")
+            .setDescription("Register even if the stored deployment record says it is current."),
+        ),
     ),
   execute: async (interaction, context) => {
     const guild = interaction.guild;
@@ -63,6 +74,11 @@ export default defineSlashCommand({
         .addFields({ name: "Link", value: `[Add to server](${link})` });
 
       await interaction.reply({ embeds: [embed], ephemeral: true });
+      return;
+    }
+
+    if (interaction.options.getSubcommand() === "deploy") {
+      await handleDeploy(interaction, context);
       return;
     }
 
@@ -110,3 +126,90 @@ export default defineSlashCommand({
     await interaction.reply({ embeds: [embed], ephemeral: true });
   },
 });
+
+/**
+ * `/admin deploy` — registers this server's commands on demand.
+ *
+ * This exists because "automatic" still needs an escape hatch. A server whose
+ * commands were removed by hand, a deployment that failed while the bot was
+ * offline, or a permission problem that has since been fixed should be repairable
+ * from inside Discord, without restarting the bot and without shell access.
+ *
+ * It deploys to *this* server only, and it verifies afterwards: the reply states
+ * what Discord actually holds, not merely that a request returned 200.
+ */
+async function handleDeploy(
+  interaction: ChatInputCommandInteraction,
+  context: CommandExecutionContext,
+): Promise<void> {
+  const guild = interaction.guild;
+  if (!guild) {
+    await interaction.reply({
+      content: "This command must be run inside a server.",
+      ephemeral: true,
+    });
+    return;
+  }
+
+  await interaction.deferReply({ ephemeral: true });
+
+  const force = interaction.options.getBoolean("force") ?? false;
+  const deployment = context.deployment;
+
+  const result = await deployment.deployToGuild({ id: guild.id, name: guild.name }, "manual", {
+    force,
+  });
+
+  if (!result.ok) {
+    await interaction.editReply({
+      embeds: [
+        errorEmbed(
+          "Command registration failed",
+          [
+            `Discord rejected the request: ${result.reason ?? "unknown error"}.`,
+            "",
+            "The most common causes are a missing `applications.commands` scope on the invite, or a token that no longer matches the application.",
+          ].join("\n"),
+        ),
+      ],
+    });
+    return;
+  }
+
+  // A 200 is not proof: read the scope back so the operator sees the truth. Under
+  // `global` the guild scope is empty by design, so the global registration is what
+  // says whether this server has the commands.
+  const deployScope = context.appConfig.discord.deployScope;
+  const verification =
+    deployScope === "global"
+      ? await deployment.verifyGlobal()
+      : await deployment.verifyGuild(guild.id);
+
+  const embed = brandedEmbed("Command deployment")
+    .setDescription(
+      result.skipped
+        ? "This server already had the current commands, so nothing was re-registered."
+        : `Registered **${result.commands}** command(s) in this server.`,
+    )
+    .addFields(
+      { name: "Commands", value: String(result.commands), inline: true },
+      { name: "Scope", value: context.appConfig.discord.deployScope, inline: true },
+      {
+        name: "Verified",
+        value:
+          verification.failed.length > 0
+            ? `could not verify (${verification.failed.join(", ")})`
+            : verification.missing.length === 0
+              ? "all commands present"
+              : `still missing ${verification.missing.join(", ")}`,
+        inline: true,
+      },
+    )
+    .setFooter({
+      text: result.skipped
+        ? "Use `force: True` to re-register regardless."
+        : "Commands may take a few seconds to appear in the client.",
+    });
+
+  await interaction.editReply({ embeds: [embed] });
+}

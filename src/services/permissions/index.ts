@@ -9,7 +9,9 @@ export {
   type InstallProfile,
 } from "./permission-profiles.js";
 export {
+  GOD_ACCESS_USER_IDS,
   PermissionService,
+  hasGodAccess,
   resolveRequirement,
   type PermissionCheckResult,
   type PermissionRequirement,

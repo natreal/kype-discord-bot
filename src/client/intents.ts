@@ -13,7 +13,6 @@ export const BASE_INTENTS: readonly GatewayIntentBits[] = [
   GatewayIntentBits.Guilds,
   GatewayIntentBits.GuildMembers,
 ];
-
 /**
  * Privileged intents, enabled explicitly.
  *
@@ -23,6 +22,12 @@ export const BASE_INTENTS: readonly GatewayIntentBits[] = [
 export const INTENT_FEATURES = {
   /** Needed for member join/leave events and member joins in the cache. */
   guildMembers: { intents: [GatewayIntentBits.GuildMembers], privileged: true },
+  /**
+   * Needed for `messageUpdate` and `messageDelete`, which the log module listens to.
+   * Not privileged, so it can be enabled without a portal toggle — unlike
+   * `messageContent` below, which the *body* of a message requires.
+   */
+  guildMessages: { intents: [GatewayIntentBits.GuildMessages], privileged: false },
   /** Needed for message-based AI moderation, anti-spam and automations. */
   messageContent: { intents: [GatewayIntentBits.MessageContent], privileged: true },
   /** Needed to track moderation activity / audit log driven features. */

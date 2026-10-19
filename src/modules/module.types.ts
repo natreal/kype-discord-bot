@@ -16,12 +16,45 @@ import type { GuildConfig } from "../services/config/index.js";
 import type { Logger } from "../services/logger/index.js";
 import type { Setuper } from "./setup.types.js";
 
+/**
+ * Guild-bound ticket access granted to modules that need it at setup time.
+ *
+ * A narrow port rather than the `TicketService`: setup needs to seed categories, and
+ * nothing else. Handing it the whole service would let a setup action close a ticket,
+ * which is not a thing setup should ever do. `null` when the running process has no
+ * ticket service (a harness, or a guild whose module was not wired).
+ */
+export interface ModuleTicketContext {
+  readonly guildId: string;
+  /** Actor recorded on the audit events the seeding writes. */
+  readonly actorId: string;
+  findCategory(guildId: string, key: string): Promise<{ id: string } | null>;
+  saveCategory(
+    actorId: string,
+    draft: {
+      guildId: string;
+      key: string;
+      label: string;
+      emoji?: string | null;
+      description?: string | null;
+      parentId?: string | null;
+      staffRoleIds?: readonly string[];
+      pingRoleIds?: readonly string[];
+      prompt?: string | null;
+      enabled?: boolean;
+      position?: number;
+    },
+  ): Promise<{ id: string }>;
+}
+
 /** Services granted to every module. No module may create its own clients. */
 export interface ModuleContext {
   readonly config: GuildConfig;
   readonly logger: Logger;
   /** Idempotent Discord resource helpers. */
   readonly setuper: Setuper;
+  /** Ticket access for setup actions that seed categories, when available. */
+  readonly tickets?: ModuleTicketContext;
 }
 
 /**

@@ -2,12 +2,12 @@
  * Centralized permission service.
  *
  * All authorization checks go through this service so that permission logic is
- * never duplicated across commands. Two layers are evaluated:
+ * never duplicated across commands. Three layers are evaluated:
  *
- * - Discord permissions: the initial, fully implemented authorization layer.
- * - Bot permissions: a namespaced catalog (`moderation.ban`, ...). For V1 the
- *   catalog is used to *describe* required permissions; custom role overrides
- *   can be plugged in later without changing call sites.
+ * - God Access: one operator-owned Discord user ID that bypasses everything.
+ * - Discord permissions: the fully implemented authorization layer.
+ * - Bot permissions: a namespaced catalog (`moderation.ban`, ...). The catalog is
+ *   used to *describe* required permissions and to encode application policy.
  */
 import {
   type GuildMember,
@@ -18,15 +18,40 @@ import {
 } from "discord.js";
 
 import { PermissionError } from "../../utils/errors.js";
+import { GOD_ACCESS_USER_ID } from "../../modules/setup/setup-module.js";
+import type { Permission } from "../authorization/permissions.js";
 import { CRITICAL_PERMISSIONS } from "./permission-profiles.js";
 import { botPermissionsForDiscord } from "./permission-map.js";
 import { isBotPermission, type BotPermission } from "./permissions.js";
 
 const ADMINISTRATOR = PermissionFlagsBits.Administrator;
 
+/**
+ * Users who hold God Access.
+ *
+ * A single ID, by explicit operator decision: the deployment owner can use every
+ * feature regardless of the Discord permissions they hold. It is intentionally a
+ * *user* ID rather than a role, so no guild administrator can grant it to
+ * themselves, and it is never read from configuration or user input.
+ */
+export const GOD_ACCESS_USER_IDS: readonly string[] = [GOD_ACCESS_USER_ID];
+
+/** @returns true when `userId` holds God Access. */
+export function hasGodAccess(userId: string | null | undefined): boolean {
+  return typeof userId === "string" && GOD_ACCESS_USER_IDS.includes(userId);
+}
+
 export interface PermissionRequirement {
   /** Discord permissions the invoker must hold. */
   readonly discord?: readonly PermissionResolvable[];
+  /**
+   * Granular V3 permission identifiers the invoker must hold.
+   *
+   * Evaluated by the authorization layer through the role → class → permission
+   * mapping, so a server can grant moderation powers without granting Discord's
+   * own permissions — which is the whole point of the V3 permission model.
+   */
+  readonly custom?: readonly Permission[];
   /** Discord permissions the bot itself must hold in the channel. */
   readonly bot?: readonly PermissionResolvable[];
   /** Named bot permissions (used for future custom role overrides). */
@@ -84,6 +109,13 @@ export class PermissionService {
   ): PermissionCheckResult {
     const resolved = resolveRequirement(requirement);
 
+    // God Access is absolute: it precedes every other rule, including `ownerOnly`
+    // and unknown bot permission names, so the owner can never lock themselves out
+    // of their own deployment. Callers log the bypass as a privileged event.
+    if (hasGodAccess(member.id)) {
+      return ALLOWED;
+    }
+
     if (resolved.ownerOnly === true && member.guild.ownerId !== member.id) {
       return {
         allowed: false,
@@ -102,6 +134,27 @@ export class PermissionService {
         allowed: false,
         missing: unknownBotPermissions,
         reason: "The command requests an unknown bot permission.",
+      };
+    }
+
+    // Granular (custom) permissions are resolved by `AuthorizationService`
+    // through the guild's role → class mapping, which this synchronous service
+    // has no access to (the mapping is guild-scoped and asynchronous).
+    //
+    // Ignoring them here — as this service used to — is a silent *allow*, and it
+    // is exactly how `/ai enable` was reachable by every member. Failing closed
+    // makes the limitation explicit: a caller that needs a custom permission
+    // must go through the authorization layer, never through this service.
+    // The guild owner and administrators keep passing, because the authorization
+    // layer models them as holding the implied `owner`/`administrator` class
+    // (every granular permission).
+    const custom = resolved.custom ?? [];
+    if (custom.length > 0 && !this.bypassesDiscordChecks(member)) {
+      return {
+        allowed: false,
+        missing: custom,
+        reason:
+          "This action needs role-based permissions, which only the authorization layer can resolve.",
       };
     }
 
@@ -125,13 +178,28 @@ export class PermissionService {
   }
 
   /**
-   * @returns true when the member holds `Administrator` or owns the guild.
+   * @returns true when the member holds `Administrator`, owns the guild, or has
+   * God Access.
    *
    * Exposed so that future modules can log privileged actions distinctly: an
    * administrator acting through the bot is an audit-worthy event.
    */
   public bypassesDiscordChecks(member: GuildMember): boolean {
-    return member.permissions.has(ADMINISTRATOR) || member.guild.ownerId === member.id;
+    return (
+      hasGodAccess(member.id) ||
+      member.permissions.has(ADMINISTRATOR) ||
+      member.guild.ownerId === member.id
+    );
+  }
+
+  /**
+   * @returns true when `member` holds God Access.
+   *
+   * A named accessor (rather than comparing IDs at call sites) keeps the single
+   * source of truth intact and makes the privilege greppable.
+   */
+  public isGodAccess(member: GuildMember | null | undefined): boolean {
+    return hasGodAccess(member?.id);
   }
 
   /** Verifies the bot can actually act in the guild/channel it was invoked in. */

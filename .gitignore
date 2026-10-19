@@ -38,6 +38,18 @@ yarn-debug.log*
 yarn-error.log*
 pnpm-debug.log*
 
+# --- Desktop launcher runtime state ----------------------------------------
+# PID/lock files written by scripts/desktop/supervisor.sh, and the generated
+# app bundle produced by `npm run desktop:app` (regenerate, do not commit).
+.run/
+*.app/
+
+# --- Deployment artifacts --------------------------------------------------
+# Database dumps written by scripts/deploy/deploy.ps1 before migrations, and the
+# dependency tree kept for rollback. Neither belongs in git.
+backups/
+node_modules.__previous/
+
 # --- Editors / IDEs --------------------------------------------------------
 .vscode/*
 !.vscode/extensions.json

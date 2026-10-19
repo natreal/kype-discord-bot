@@ -47,7 +47,36 @@ describe("CommandRegistry", () => {
         .list()
         .map((command) => command.name)
         .sort(),
-    ).toEqual(["about", "admin", "help", "ping", "serverinfo"]);
+    ).toEqual([
+      "about",
+      "admin",
+      "ai",
+      "automod",
+      "backup",
+      "ban",
+      "diagnostics",
+      "help",
+      "history",
+      "kick",
+      "maintenance",
+      "mute",
+      "ping",
+      "purge",
+      "roles",
+      "security",
+      "serverinfo",
+      "settings",
+      "setup",
+      "softban",
+      "ticket",
+      "timeout",
+      "unban",
+      "unmute",
+      "untimeout",
+      "unwarn",
+      "warn",
+      "warnings",
+    ]);
   });
 
   it("exposes the registry on the client", async () => {

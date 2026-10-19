@@ -76,6 +76,52 @@ describe("environment validation", () => {
     expect(config.discord.devGuildId).toBeUndefined();
   });
 
+  it("defaults automatic command deployment to off", () => {
+    const config = testConfig();
+
+    // The foundation shipped out-of-band deployment, so an existing installation
+    // must not start registering commands just because it upgraded.
+    expect(config.discord.autoDeployCommands).toBe(false);
+    expect(config.discord.deployScope).toBe("global");
+  });
+
+  it('reads a truthful boolean instead of coercing the string "false"', () => {
+    // `z.coerce.boolean()` treats "false" as truthy, which would silently enable a
+    // feature an operator explicitly disabled.
+    expect(testConfig({ COMMANDS_AUTO_DEPLOY: "false" }).discord.autoDeployCommands).toBe(false);
+    expect(testConfig({ COMMANDS_AUTO_DEPLOY: "true" }).discord.autoDeployCommands).toBe(true);
+    expect(testConfig({ COMMANDS_AUTO_DEPLOY: "1" }).discord.autoDeployCommands).toBe(true);
+    expect(testConfig({ COMMANDS_AUTO_DEPLOY: "no" }).discord.autoDeployCommands).toBe(false);
+  });
+
+  it("rejects an unknown deployment scope instead of guessing", () => {
+    expect(() =>
+      createConfig(rawEnv({ COMMANDS_DEPLOY_SCOPE: "guilds" }), { loadEnvFiles: false }),
+    ).toThrow(ConfigError);
+  });
+
+  it("defaults the deployment scope to global so commands are never listed twice", () => {
+    // Discord treats command names as unique within a scope, not across scopes, so
+    // the same command registered globally *and* per guild appears twice in every
+    // server's picker. A default must not produce that, so `global+guilds` is only
+    // reachable by asking for it.
+    expect(testConfig().discord.deployScope).toBe("global");
+    expect(testConfig({ DISCORD_DEV_GUILD_ID: "" }).discord.deployScope).toBe("global");
+  });
+
+  it("accepts each documented deployment scope", () => {
+    for (const scope of ["global", "global+guilds", "dev-guild"] as const) {
+      expect(testConfig({ COMMANDS_DEPLOY_SCOPE: scope }).discord.deployScope).toBe(scope);
+    }
+  });
+
+  it("shows the deployment settings in the redacted configuration", () => {
+    const redacted = JSON.stringify(redactConfig(testConfig({ COMMANDS_AUTO_DEPLOY: "true" })));
+
+    expect(redacted).toContain("autoDeployCommands");
+    expect(redacted).toContain("deployScope");
+  });
+
   it("keeps secrets out of the redacted configuration", () => {
     const config = testConfig();
     const redacted = JSON.stringify(redactConfig(config));
@@ -89,5 +135,33 @@ describe("environment validation", () => {
     const redacted = redactConnectionString("postgresql://user:secret@localhost:5432/db");
     expect(redacted).not.toContain("secret");
     expect(redacted).toContain("localhost");
+  });
+
+  it("defaults the AI keyword and token budget to safe values, and stays optional", () => {
+    const config = testConfig();
+    expect(config.ai.baseUrl).toBeUndefined();
+    expect(config.ai.apiKey).toBeUndefined();
+    expect(config.ai.defaultTrigger).toBe("kype");
+    expect(config.ai.dailyTokenBudget).toBe(0);
+    expect(config.ai.requestTimeoutMs).toBe(20_000);
+  });
+
+  it("reads AI environment variables and masks the API key in the redacted config", () => {
+    const config = testConfig({
+      AI_BASE_URL: "http://localhost:11434/v1",
+      AI_API_KEY: "secret-key",
+      AI_MODEL_FAST: "llama3",
+      AI_DEFAULT_TRIGGER: "bot",
+      AI_DAILY_TOKEN_BUDGET: "100000",
+    });
+    expect(config.ai.baseUrl).toBe("http://localhost:11434/v1");
+    expect(config.ai.apiKey).toBe("secret-key");
+    expect(config.ai.modelFast).toBe("llama3");
+    expect(config.ai.defaultTrigger).toBe("bot");
+    expect(config.ai.dailyTokenBudget).toBe(100_000);
+
+    const redacted = JSON.stringify(redactConfig(config));
+    expect(redacted).not.toContain("secret-key");
+    expect(redacted).toContain("[redacted]");
   });
 });

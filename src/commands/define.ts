@@ -63,6 +63,9 @@ export function defineSlashCommand(definition: SlashCommandDefinition): SlashCom
     execute: definition.execute,
     permissions: buildRequirement(definition),
     guildOnly: definition.guildOnly ?? true,
+    // Commands are deployed unless a module says otherwise: a new command must
+    // reach servers by default, and opting out has to be a deliberate act.
+    deploy: definition.deploy ?? true,
   };
 
   return definition.autocomplete === undefined
@@ -85,6 +88,7 @@ export function defineContextMenuCommand(
     execute: definition.execute,
     permissions: buildRequirement(definition),
     guildOnly: definition.guildOnly ?? true,
+    deploy: definition.deploy ?? true,
   };
 }
 

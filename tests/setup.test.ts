@@ -70,15 +70,27 @@ describe("SetupService idempotency and auditing", () => {
     expect(database.setupRuns[0]).toMatchObject({ scope: "logging", status: "completed" });
   });
 
-  it("persists created resources and completed sections", async () => {
+  it("persists completed sections", async () => {
     const { service, database } = createSetupHarness();
     await service.run(guild, "core");
 
     const stored = database.settings.get(SETUP_GUILD_ID) as {
       setup: { resources: Record<string, string>; completedSections: string[] };
     };
-    expect(Object.keys(stored.setup.resources)).toContain("core.core.category");
     expect(stored.setup.completedSections).toContain("core");
+  });
+
+  it("does not persist V1 module resources in the tracked resource map", async () => {
+    const { service, database } = createSetupHarness();
+    await service.run(guild, "core");
+
+    const stored = database.settings.get(SETUP_GUILD_ID) as {
+      setup: { resources: Record<string, string>; completedSections: string[] };
+    };
+    // V2 rule: only the automatic setup module owns tracked identifiers, because
+    // resource identity lives in `setup_resources` and a flat name-keyed map would
+    // go stale the moment an administrator renames a channel.
+    expect(Object.keys(stored.setup.resources)).toEqual([]);
   });
 
   it("reuses resources that already exist on Discord", async () => {

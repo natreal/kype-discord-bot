@@ -8,7 +8,12 @@
 import type { BotModule, SetupAction } from "../module.types.js";
 
 export const LOGGING_RESOURCES = {
-  channel: "bot-logs",
+  // The canonical log channel name the sinks resolve against (`GuildLogSink` and
+  // `ModerationLogSink` both fall back to `server-logs`). Kept in one place so the
+  // module that creates the channel and the sinks that read it can never drift
+  // apart — the earlier `bot-logs` name meant the module created a channel nothing
+  // ever posted to.
+  channel: "server-logs",
 } as const;
 
 export const loggingModule: BotModule = {

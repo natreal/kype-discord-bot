@@ -33,7 +33,11 @@ export function createSetupHarness(
   modules: readonly BotModule[] = [coreModule, loggingModule, securityModule],
 ): SetupHarness {
   const database = memoryDatabaseStub();
-  const config = new ConfigService(database as unknown as DatabaseService, testLogger);
+  const config = new ConfigService({
+    database: database as unknown as DatabaseService,
+    logger: testLogger,
+    repository: database.configRepository,
+  });
   const discord = fakeSetuper(SETUP_GUILD_ID);
 
   const service = new SetupService({

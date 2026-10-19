@@ -20,7 +20,11 @@
 export {
   AiToolRegistry,
   type AiTool,
+  type AiToolActionsPort,
+  type AiToolCategory,
   type AiToolContext,
   type AiToolResult,
 } from "../modules/ai/ai.module.js";
 export { aiModule } from "../modules/ai/ai.module.js";
+export { buildToolMenu, type AiMode, type AiToolMenu } from "../modules/ai/tool-menu.js";
+export { AI_TOOLS } from "../modules/ai/ai-tools.js";

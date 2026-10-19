@@ -29,6 +29,16 @@ export interface Logger {
   child(scope: string): Logger;
   /** Returns a logger that attaches fixed context (guild, user) to every record. */
   withContext(context: LogContext): Logger;
+  /**
+   * Attaches an additional sink.
+   *
+   * The logger is created before the Discord client is ready, while the sink that
+   * delivers to a guild's log channel needs the client. Registering it later
+   * (rather than passing a half-built client to `createLogger`) keeps both
+   * constructions honest; every logger derived from this one observes the new
+   * sink, because child and context loggers share the same sink list.
+   */
+  addSink(sink: LogSink): void;
 }
 
 export interface LoggerOptions {
@@ -111,6 +121,11 @@ function buildLogger(
     child: (childScope) =>
       buildLogger(`${scope}:${childScope}`, options, sinks, threshold, context),
     withContext: (extra) => buildLogger(scope, options, sinks, threshold, { ...context, ...extra }),
+    addSink: (sink) => {
+      // The sink list is shared (not copied) between the logger and its children,
+      // so one registration reaches every existing derived logger.
+      (sinks as LogSink[]).push(sink);
+    },
   };
 }
 
@@ -123,4 +138,5 @@ export const nullLogger: Logger = {
   error: () => undefined,
   child: () => nullLogger,
   withContext: () => nullLogger,
+  addSink: () => undefined,
 };

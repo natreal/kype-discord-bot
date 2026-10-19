@@ -1,0 +1,25 @@
+export {
+  CommandDeploymentService,
+  canonicalize,
+  describeError,
+  fingerprintOf,
+  isRetryable,
+  statusOf,
+  type DeployScope,
+  type DeployableGuild,
+  type CommandDeploymentOptions,
+  type DeploymentReport,
+  type DeploymentRest,
+  type GuildDeploymentResult,
+  type VerifyResult,
+} from "./command-deployment.service.js";
+export {
+  DEPLOYMENT_SOURCES,
+  MemoryCommandDeploymentRepository,
+  PrismaCommandDeploymentRepository,
+  isDeploymentSource,
+  type CommandDeploymentRecord,
+  type CommandDeploymentRepository,
+  type CommandDeploymentWrite,
+  type DeploymentSource,
+} from "./command-deploy.repository.js";

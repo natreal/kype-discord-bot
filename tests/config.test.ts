@@ -7,6 +7,7 @@
 import { describe, expect, it, vi } from "vitest";
 
 import { ConfigService } from "../../src/services/config/config.service.js";
+import { PrismaGuildConfigRepository } from "../../src/services/config/guild-config.repository.js";
 import {
   defaultGuildConfig,
   guildConfigSchema,
@@ -31,7 +32,11 @@ function createService(): {
     child: () => logger,
     withContext: () => logger,
   };
-  const service = new ConfigService(database as unknown as DatabaseService, logger);
+  const service = new ConfigService({
+    database: database as unknown as DatabaseService,
+    logger,
+    repository: database.configRepository,
+  });
   return { service, database };
 }
 
@@ -49,6 +54,7 @@ describe("guild configuration defaults", () => {
     expect(config.security.antiRaid.joinsPerMinute).toBe(10);
     expect(config.ai.enabled).toBe(false);
     expect(config.tickets.enabled).toBe(false);
+    expect(config.tickets.memberTicketLimit).toBe(3);
     expect(config.automation.timezone).toBe("UTC");
     expect(config.members.autoRoleIds).toEqual([]);
     expect(config.setup.completedSections).toEqual([]);
@@ -70,6 +76,10 @@ describe("guild configuration defaults", () => {
     expect(() => guildConfigSchema.parse({ moderation: { warnThreshold: -5 } })).toThrow();
     expect(() => guildConfigSchema.parse({ logging: { channelId: "not-a-snowflake" } })).toThrow();
     expect(() => guildConfigSchema.parse({ language: "klingon" })).toThrow();
+    // The per-member ticket ceiling is a bounded integer, so a zero or a runaway value
+    // is rejected before it reaches the database.
+    expect(() => guildConfigSchema.parse({ tickets: { memberTicketLimit: 0 } })).toThrow();
+    expect(() => guildConfigSchema.parse({ tickets: { memberTicketLimit: 26 } })).toThrow();
   });
 
   it("exposes the sections the setup system orchestrates", () => {
@@ -98,6 +108,18 @@ describe("ConfigService", () => {
 
     expect(config.language).toBe("en");
     expect(config.moderation.warnThreshold).toBe(3);
+  });
+
+  it("peeks configuration without creating a guild row", async () => {
+    const { service, database } = createService();
+
+    // The maintenance gate runs on every interaction, autocomplete included: a read
+    // there must not write to `guilds`.
+    const config = await service.peek("111111111111111111");
+
+    expect(config.language).toBe("en");
+    expect(config.maintenance.enabled).toBe(false);
+    expect(database.guilds.size).toBe(0);
   });
 
   it("persists updates per guild and merges partial changes", async () => {
@@ -153,5 +175,41 @@ describe("ConfigService", () => {
     await service.ensureGuild("111111111111111111", "Guild");
 
     expect(database.guilds.size).toBe(1);
+  });
+});
+
+describe("PrismaGuildConfigRepository.ensureGuild", () => {
+  /** Captures the upsert payload instead of talking to PostgreSQL. */
+  function createRepository(): { repository: PrismaGuildConfigRepository; calls: unknown[] } {
+    const calls: unknown[] = [];
+    const prisma = {
+      guild: {
+        upsert(args: unknown) {
+          calls.push(args);
+          return Promise.resolve({});
+        },
+      },
+    };
+    return {
+      repository: new PrismaGuildConfigRepository(prisma as never),
+      calls,
+    };
+  }
+
+  it("updates the name when the caller knows it", async () => {
+    const { repository, calls } = createRepository();
+
+    await repository.ensureGuild("111111111111111111", "Real Guild");
+
+    expect(calls[0]).toMatchObject({ update: { name: "Real Guild" } });
+  });
+
+  it("does not rename a guild to the placeholder", async () => {
+    const { repository, calls } = createRepository();
+
+    // Interaction paths pass no name; that must not overwrite display data.
+    await repository.ensureGuild("111111111111111111", "unknown");
+
+    expect(calls[0]).toMatchObject({ update: {} });
   });
 });

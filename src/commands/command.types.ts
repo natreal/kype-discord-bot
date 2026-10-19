@@ -59,6 +59,16 @@ export interface CommandBase extends CommandMeta {
   readonly permissions: PermissionRequirement;
   /** Guild-only commands receive a guaranteed non-null guild context. */
   readonly guildOnly: boolean;
+  /**
+   * Whether this command is pushed to Discord by a deployment.
+   *
+   * Defaults to `true`. Set it to `false` for a command that must be loadable and
+   * testable but must not appear in servers yet — an unfinished surface, or one
+   * being rolled out deliberately. A command that is never deployed but is
+   * reachable would be dead code; keeping the flag here means the decision is
+   * explicit and visible in one place instead of living in a list of names.
+   */
+  readonly deploy: boolean;
 }
 
 /** A slash command. */
@@ -69,7 +79,10 @@ export interface SlashCommand extends CommandBase {
     interaction: ChatInputCommandInteraction,
     context: CommandExecutionContext,
   ): Promise<void>;
-  autocomplete?: (interaction: AutocompleteInteraction) => Promise<void>;
+  autocomplete?: (
+    interaction: AutocompleteInteraction,
+    context: CommandExecutionContext,
+  ) => Promise<void>;
 }
 
 /** A user or message context-menu command. */
@@ -110,6 +123,8 @@ export interface CommonCommandDefinition {
   readonly guildOnly?: boolean;
   /** Named bot permissions, mapped onto Discord permissions. */
   readonly botPermissions?: readonly BotPermission[];
+  /** Set to `false` to keep the command out of deployments (default: `true`). */
+  readonly deploy?: boolean;
 }
 
 /** Keys that are valid inside a command definition file. */
@@ -119,4 +134,6 @@ export interface CommandDefinition {
   readonly guildOnly?: boolean;
   /** Named bot permissions; resolved to Discord permissions when omitted. */
   readonly botPermissions?: readonly BotPermission[];
+  /** Set to `false` to keep the command out of deployments (default: `true`). */
+  readonly deploy?: boolean;
 }
