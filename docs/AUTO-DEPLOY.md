@@ -260,21 +260,22 @@ PC is the second one, so backups work without adding anything to `PATH`.
 
 ## Troubleshooting
 
-| Symptom                                       | Likely cause / fix                                                                                                          |
-| --------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------- |
-| `state=failed`, "No git remote is configured" | Add `origin` and push `main`                                                                                                |
-| "git fetch failed" every five minutes         | Host offline, or stored credentials expired — run `git fetch` manually                                                      |
-| "working tree has uncommitted changes"        | Commit/stash local edits; the script will not overwrite them                                                                |
-| `state=blocked` after a failed deploy         | That commit is suspended; fix forward, or `npm run deploy:auto:force`                                                       |
-| "not an ancestor of origin/main"              | Local commits or a force-push on GitHub; reconcile manually                                                                 |
-| Loops on "did not report Startup complete"    | Read `logs\bot.log`; the previous commit is restored automatically                                                          |
-| Task shows "Last Run Result 0x1"              | A check failed; `.run\deploy-state.json` and `logs\deploy.log` say which                                                    |
-| Nothing happens after a push                  | Confirm the task is enabled and the user is logged on                                                                       |
-| Rollback also fails                           | Start the bot manually, fix the commit on `main`, then re-run the task                                                      |
-| "pg_dump was not found" in the log            | Install the PostgreSQL client tools or add their `bin` to `PATH`; the deploy continues without a backup                     |
-| Bot restarts in the middle of a deploy        | The watchdog was not paused: check that it uses `watchdog.pause` in its folder, or pass `-WatchdogPauseFile`                |
-| Watchdog log says the task is absent          | Re-create the bot task with `npm run bot:autostart` (the console watches that exact name)                                   |
-| A pause file is left behind after a crash     | Nothing to do: the next deploy recognises its own leftover and removes it; delete it yourself to re-arm the watchdog sooner |
+| Symptom                                         | Likely cause / fix                                                                                                                                                          |
+| ----------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `state=failed`, "No git remote is configured"   | Add `origin` and push `main`                                                                                                                                                |
+| "git fetch failed" every five minutes           | Host offline, or stored credentials expired — run `git fetch` manually                                                                                                      |
+| "working tree has uncommitted changes"          | Commit/stash local edits; the script will not overwrite them                                                                                                                |
+| `state=blocked` after a failed deploy           | That commit is suspended; fix forward, or `npm run deploy:auto:force`                                                                                                       |
+| "not an ancestor of origin/main"                | Local commits or a force-push on GitHub; reconcile manually                                                                                                                 |
+| Loops on "did not report Startup complete"      | Read `logs\bot.log`; the previous commit is restored automatically                                                                                                          |
+| Task shows "Last Run Result 0x1"                | A check failed; `.run\deploy-state.json` and `logs\deploy.log` say which                                                                                                    |
+| Nothing happens after a push                    | Confirm the task is enabled and the user is logged on                                                                                                                       |
+| Rollback also fails                             | Start the bot manually, fix the commit on `main`, then re-run the task                                                                                                      |
+| "pg_dump was not found" in the log              | Install the PostgreSQL client tools or add their `bin` to `PATH`; the deploy continues without a backup                                                                     |
+| Bot restarts in the middle of a deploy          | The watchdog was not paused: check that it uses `watchdog.pause` in its folder, or pass `-WatchdogPauseFile`                                                                |
+| Watchdog log says the task is absent            | Re-create the bot task with `npm run bot:autostart` (the console watches that exact name)                                                                                   |
+| A pause file is left behind after a crash       | Nothing to do: the next deploy recognises its own leftover and removes it; delete it yourself to re-arm the watchdog sooner                                                 |
+| `push` rejected: "... without `workflow` scope" | The stored GitHub credential may not create or update files under `.github/workflows/`; add the `workflow` scope to that token (or push with `gh auth refresh -s workflow`) |
 
 Useful checks:
 
