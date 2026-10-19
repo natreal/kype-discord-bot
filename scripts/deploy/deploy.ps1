@@ -197,11 +197,14 @@ function Get-EnvValue {
 # branch", "dumping contents of table"). Capture with the preference relaxed so
 # the exit code stays the only thing that decides whether a step failed.
 function Invoke-Native {
-  param([scriptblock]$Command)
+  # The scriptblock runs in this scope, so a parameter named $Command or
+  # $Arguments here would shadow the caller's variable of that name. Keep the
+  # parameter names specific.
+  param([scriptblock]$Body)
   $previous = $ErrorActionPreference
   $ErrorActionPreference = "Continue"
   try {
-    $result = & $Command
+    $result = & $Body
   } finally {
     $ErrorActionPreference = $previous
   }
@@ -236,15 +239,16 @@ function Invoke-Npm {
 }
 
 function Invoke-Botctl {
-  param([string]$Command)
-  Write-DeployLog "==> botctl $Command"
+  param([string]$Action)
+  Write-DeployLog "==> botctl $Action"
   if (-not (Test-Path $Botctl)) { throw "Missing $Botctl" }
-  $output = Invoke-Native { & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $Botctl $Command 2>&1 }
+  $botctlArgs = @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $Botctl, $Action)
+  $output = Invoke-Native { & powershell.exe @botctlArgs 2>&1 }
   $code = $LASTEXITCODE
   foreach ($line in @($output)) {
     Add-Content -Path $DeployLog -Value (Redact ([string]$line)) -Encoding UTF8
   }
-  if ($code -ne 0) { throw "botctl $Command failed with exit code $code" }
+  if ($code -ne 0) { throw "botctl $Action failed with exit code $code" }
 }
 
 function Get-BotProcesses {
