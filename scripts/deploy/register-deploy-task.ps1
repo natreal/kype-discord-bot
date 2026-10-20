@@ -46,12 +46,11 @@ if ($IntervalMinutes -lt 1) { throw "IntervalMinutes must be at least 1." }
 if (-not (Test-Path $DeployScript)) { throw "Missing $DeployScript" }
 
 # -WindowStyle Hidden keeps the console flash out of the way; every line still
-# lands in logs\deploy.log. schtasks has no "start in" switch and runs the job in
-# C:\Windows\System32, where npm would then look for package.json, so the command
-# changes directory first. deploy.ps1 also sets its own location as a backstop.
-$ProjectDir = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path
-$inner = "powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$DeployScript`""
-$action = "cmd.exe /c cd /d `"$ProjectDir`" && $inner"
+# lands in logs\deploy.log. schtasks has no "start in" switch, so the job starts
+# in C:\Windows\System32. deploy.ps1 therefore moves into the repository itself
+# before running any npm step. Do not wrap this in "cmd.exe /c cd /d ... && ...":
+# schtasks accepts it but every run then fails with 0xFFFD0000.
+$action = "powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$DeployScript`""
 
 & schtasks.exe /Create /TN $TaskName /SC MINUTE /MO $IntervalMinutes /TR $action /RL HIGHEST /F
 if ($LASTEXITCODE -ne 0) {
