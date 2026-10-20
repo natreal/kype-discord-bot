@@ -1233,14 +1233,14 @@ arbitrary code.
 ## Automated deployment (GitHub to Windows PC)
 
 The host PC **pulls**; GitHub never pushes to it. A Windows scheduled task runs
-`scripts/deploy/deploy.ps1` every five minutes. When `origin/main` has moved, the
+`scripts/deploy/deploy.ps1` every minute. When `origin/main` has moved, the
 script stops the bot gracefully, fast-forwards, installs from the lockfile,
 builds, tests, backs up PostgreSQL, applies migrations, starts the bot and waits
 for its own `Startup complete` line. Any failure rolls the checkout and the
 dependency tree back to the previous commit and restarts the bot.
 
 ```
-git push origin main ──► GitHub ──► scheduled task (every 5 min)
+git push origin main ──► GitHub ──► scheduled task (every minute)
                                        │
                                        ├─ fetch, verify clean + fast-forwardable
                                        ├─ botctl stop (graceful, file-based)

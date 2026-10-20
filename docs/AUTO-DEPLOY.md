@@ -12,7 +12,7 @@ nothing but outbound HTTPS.
 git push origin main
         │
         ▼
-     GitHub  ◄──── git fetch (every 5 minutes, outbound HTTPS)
+     GitHub  ◄──── git fetch (every minute, outbound HTTPS)
         │                    │
         │                    ▼
         │            scripts\deploy\deploy.ps1
@@ -239,6 +239,36 @@ dirty and does nothing.
 `pg_dump` is looked up on `PATH`, then in `%USERPROFILE%\pgsql\bin`, then in
 `C:\Program Files\PostgreSQL\{17,16,15}\bin` — the portable install used on this
 PC is the second one, so backups work without adding anything to `PATH`.
+
+---
+
+## Editing from another machine
+
+The repository is the only transport: edit anywhere (a clone on a Mac, or the
+GitHub web editor), commit to `main`, push, and the PC picks it up on its own.
+Nothing has to be installed on the editing machine and no port has to be opened.
+
+```
+Mac / GitHub web ──push──► GitHub ──► scheduled task on the PC (every minute)
+```
+
+- **Latency** — one fetch interval plus one deployment, so roughly one to three
+  minutes. Change the interval with
+  `npm run deploy:task:install -- -IntervalMinutes 1`.
+- **Only if it passes** — a commit that breaks the build, the tests or the
+  database smoke test never reaches the bot: the checkout is rolled back and the
+  bot keeps running the previous build. The next commit (or `-Force`) retries.
+- **Fast-forwards only** — a force-push or a rewritten history is refused
+  ("Local HEAD is not an ancestor of origin/main"), so `git push --force` from
+  another machine cannot erase the deployed state.
+- **`.env` does not travel** — it is ignored by git and stays on the PC; secrets
+  are edited there, never pushed.
+- **The PC must be awake and logged on** — the scheduled tasks run in the
+  interactive session (see _Limits worth knowing_).
+- **Slash commands are not registered by the deploy** — after adding one, run
+  `/admin deploy` in Discord or `npm run deploy:commands` on the PC.
+- **One deployment at a time** — pushing twice in a row deploys the newest
+  commit; a run that is still busy makes the next one a no-op.
 
 ---
 
