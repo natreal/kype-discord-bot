@@ -55,6 +55,17 @@ $script:NpmCmd = "npm.cmd"
 $foundNpm = Get-Command npm.cmd -ErrorAction SilentlyContinue
 if ($foundNpm) { $script:NpmCmd = $foundNpm.Source }
 
+# Task Scheduler starts a job with an empty "Start in", so the working directory
+# is C:\Windows\System32. git is told where the repository is (-C), but npm and
+# the npm scripts resolve everything relative to the current directory -- a
+# deploy started by the task failed with "npm ci can only install with an
+# existing package-lock.json" because of exactly that. Move into the project
+# before any step runs, and fail loudly if that is impossible.
+Set-Location -LiteralPath $ProjectDir
+if (-not (Test-Path (Join-Path (Get-Location).Path "package-lock.json"))) {
+  throw "Not in the project root ($((Get-Location).Path)); package-lock.json is missing."
+}
+
 $script:LockStream = $null
 
 New-Item -ItemType Directory -Force -Path $RunDir, $LogDir | Out-Null
