@@ -1,8 +1,8 @@
 # ===========================================================================
 # Registers (or removes) the Windows scheduled task that drives deploy.ps1.
 #
-#   register-deploy-task.ps1                 # every 5 minutes
-#   register-deploy-task.ps1 -IntervalMinutes 15
+#   register-deploy-task.ps1                 # every minute
+#   register-deploy-task.ps1 -IntervalMinutes 5
 #   register-deploy-task.ps1 -Status
 #   register-deploy-task.ps1 -Remove
 #
@@ -21,7 +21,7 @@
 # ===========================================================================
 [CmdletBinding()]
 param(
-  [int]$IntervalMinutes = 5,
+  [int]$IntervalMinutes = 1,
   [string]$TaskName = "Kype-AutoDeploy",
   [switch]$Remove,
   [switch]$Status
@@ -29,6 +29,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 $DeployScript = Join-Path $PSScriptRoot "deploy.ps1"
+$Launcher = (Resolve-Path (Join-Path $PSScriptRoot "..\windows\Run-Hidden.vbs")).Path
 
 if ($Status) {
   & schtasks.exe /Query /TN $TaskName /V /FO LIST
@@ -45,12 +46,20 @@ if ($Remove) {
 if ($IntervalMinutes -lt 1) { throw "IntervalMinutes must be at least 1." }
 if (-not (Test-Path $DeployScript)) { throw "Missing $DeployScript" }
 
-# -WindowStyle Hidden keeps the console flash out of the way; every line still
-# lands in logs\deploy.log. schtasks has no "start in" switch, so the job starts
-# in C:\Windows\System32. deploy.ps1 therefore moves into the repository itself
-# before running any npm step. Do not wrap this in "cmd.exe /c cd /d ... && ...":
-# schtasks accepts it but every run then fails with 0xFFFD0000.
-$action = "powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$DeployScript`""
+# The task starts wscript, which launches deploy.ps1 with no console at all.
+# Running powershell.exe directly flashes a window for a fraction of a second --
+# -WindowStyle Hidden only hides the console once Windows has created it -- and
+# this task fires every minute. Every line still lands in logs\deploy.log.
+#
+# schtasks has no "start in" switch, so the job starts in C:\Windows\System32;
+# deploy.ps1 moves into the repository itself before running any npm step. Do not
+# wrap this in "cmd.exe /c cd /d ... && ...": schtasks accepts it but every run
+# then fails with 0xFFFD0000.
+#
+# The script path is relative on purpose: schtasks.exe strips the quotes around
+# /TR, so an absolute path with a space would be split in two. Run-Hidden.vbs
+# resolves it against its own folder.
+$action = "wscript.exe //B //NoLogo `"$Launcher`" ..\deploy\deploy.ps1"
 
 & schtasks.exe /Create /TN $TaskName /SC MINUTE /MO $IntervalMinutes /TR $action /RL HIGHEST /F
 if ($LASTEXITCODE -ne 0) {

@@ -59,6 +59,7 @@ git push origin main
 | `scripts\windows\supervisor.ps1`                | Keeps the bot alive after the deploy (crash recovery)        |
 | `scripts\windows\botctl.ps1`                    | `start`, `stop`, `restart`, `status`, `logs`, `tail`         |
 | `scripts\windows\register-autostart-task.ps1`   | Creates/removes the `kype-discord-bot` logon task            |
+| `scripts\windows\Run-Hidden.vbs`                | Both tasks start through it, so no console window flashes    |
 | `C:\Users\natte\OpenClawConsole\watchdog.pause` | Pauses the console watchdog; created and removed by a deploy |
 | `logs\deploy.log`                               | Deployment transcript, redacted, rotated at 10 MB            |
 | `logs\bot.log`                                  | Bot output (supervisor + run-bot.cmd)                        |
@@ -97,12 +98,16 @@ git push origin main
    a minute of any stop, so it would undo a deploy — which is why the pipeline
    pauses it while it has the bot stopped.
 
-4. **Register the deployment task** (runs every five minutes):
+4. **Register the deployment task** (runs every minute):
 
    ```powershell
    npm run deploy:task:install
    npm run deploy:task:status
    ```
+
+   The action is `wscript.exe … Run-Hidden.vbs ..\deploy\deploy.ps1`, not
+   `powershell.exe`: PowerShell always shows a console for a fraction of a second
+   before `-WindowStyle Hidden` takes effect, and this task fires every minute.
 
 5. **Dry run** once:
 
@@ -253,8 +258,12 @@ Mac / GitHub web ──push──► GitHub ──► scheduled task on the PC (
 ```
 
 - **Latency** — one fetch interval plus one deployment, so roughly one to three
-  minutes. Change the interval with
-  `npm run deploy:task:install -- -IntervalMinutes 1`.
+  minutes. Slow the interval down with
+  `npm run deploy:task:install -- -IntervalMinutes 5`.
+- **Invisible** — the task launches PowerShell through `wscript.exe` and a window
+  style of 0, so a one-minute interval never flashes a console over a game or a
+  video. `-WindowStyle Hidden` on its own was not enough: Windows creates the
+  console first and hides it afterwards.
 - **Only if it passes** — a commit that breaks the build, the tests or the
   database smoke test never reaches the bot: the checkout is rolled back and the
   bot keeps running the previous build. The next commit (or `-Force`) retries.
@@ -293,7 +302,8 @@ Mac / GitHub web ──push──► GitHub ──► scheduled task on the PC (
 | Symptom                                         | Likely cause / fix                                                                                                                                                          |
 | ----------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `state=failed`, "No git remote is configured"   | Add `origin` and push `main`                                                                                                                                                |
-| "git fetch failed" every five minutes           | Host offline, or stored credentials expired — run `git fetch` manually                                                                                                      |
+| "git fetch failed" every minute                 | Host offline, or stored credentials expired — run `git fetch` manually                                                                                                      |
+| A console window flashes every minute           | The task still runs `powershell.exe` directly; re-register it with `npm run deploy:task:install` so it goes through `wscript.exe` + `Run-Hidden.vbs`                        |
 | "working tree has uncommitted changes"          | Commit/stash local edits; the script will not overwrite them                                                                                                                |
 | `state=blocked` after a failed deploy           | That commit is suspended; fix forward, or `npm run deploy:auto:force`                                                                                                       |
 | "not an ancestor of origin/main"                | Local commits or a force-push on GitHub; reconcile manually                                                                                                                 |

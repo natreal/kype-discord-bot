@@ -1145,7 +1145,7 @@ What the launcher guarantees, and how:
 | Reconnects after being down | The supervisor waits for `discord.com` and for PostgreSQL before retrying                       |
 | Recovers from a crash       | The supervisor relaunches the bot with a 5s→60s backoff                                         |
 | Rebuilds when it must       | `npm run build` runs once at start when `src`, `prisma` or `package.json` changed               |
-| Starts at login             | A Task Scheduler entry (`schtasks /SC ONLOGON`) running the same supervisor, with no execution time limit and restart-on-failure |
+| Starts at login             | A Task Scheduler entry (`schtasks /SC ONLOGON`) running the same supervisor through `wscript.exe` + `Run-Hidden.vbs`, so no console flashes, with no execution time limit and restart-on-failure |
 
 `bot:stop`, `bot:status` and `bot:logs` are `scripts/windows/botctl.ps1`, which acts
 only on the pids the supervisor wrote to `.run` and releases the lock when it stops
@@ -1267,7 +1267,7 @@ Day-to-day: push to `main`. Nothing else.
 | `npm run deploy:auto:force` | Retry a commit whose deployment already failed              |
 | `npm run deploy:auto:check` | Fetch and list pending commits; touch nothing               |
 | `npm run deploy:auto:status`| Last recorded result, commit and error message              |
-| `npm run deploy:task:install` | Register/refresh the 5-minute scheduled task              |
+| `npm run deploy:task:install` | Register/refresh the one-minute scheduled task            |
 | `npm run deploy:task:remove`  | Remove the scheduled task                                 |
 | `npm run bot:restart`       | Graceful stop + start through the supervisor                |
 
@@ -1283,6 +1283,9 @@ Operational notes:
   migrations additive.
 - The scheduled task runs while the user is logged on, which matches the bot's
   own logon task. For unattended reboots, enable automatic logon on the host.
+- Neither task shows a window. Both start `scripts\windows\Run-Hidden.vbs` through
+  `wscript.exe`, which launches PowerShell with its console hidden from the first
+  frame, so a one-minute check never flashes a console over a game.
 
 Full details, failure handling and manual recovery: [`docs/AUTO-DEPLOY.md`](docs/AUTO-DEPLOY.md).
 

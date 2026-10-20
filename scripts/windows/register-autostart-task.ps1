@@ -49,10 +49,13 @@ if ($Remove) {
 
 if (-not (Test-Path $Supervisor)) { throw "Missing $Supervisor" }
 
-$argument = "-NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$Supervisor`""
+# wscript launches the supervisor with no console window at all (Run-Hidden.vbs);
+# powershell.exe would flash one for a fraction of a second on every start.
+$Launcher = (Resolve-Path (Join-Path $PSScriptRoot "Run-Hidden.vbs")).Path
+$argument = "//B //NoLogo `"$Launcher`" supervisor.ps1"
 
 try {
-  $action = New-ScheduledTaskAction -Execute "powershell.exe" -Argument $argument -WorkingDirectory $ProjectDir
+  $action = New-ScheduledTaskAction -Execute "wscript.exe" -Argument $argument -WorkingDirectory $ProjectDir
   $trigger = New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME
   $settings = New-ScheduledTaskSettingsSet `
     -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable `
@@ -67,7 +70,7 @@ try {
 } catch {
   Write-Warning "Register-ScheduledTask failed: $($_.Exception.Message)"
   Write-Warning "Falling back to schtasks.exe (72-hour limit, stops on battery). Run this script from an elevated PowerShell to get the full settings."
-  & schtasks.exe /Create /TN $TaskName /SC ONLOGON /TR $argument /RL HIGHEST /F
+  & schtasks.exe /Create /TN $TaskName /SC ONLOGON /TR "wscript.exe $argument" /RL HIGHEST /F
   if ($LASTEXITCODE -ne 0) {
     throw "Could not create scheduled task '$TaskName' (schtasks exit $LASTEXITCODE)."
   }
