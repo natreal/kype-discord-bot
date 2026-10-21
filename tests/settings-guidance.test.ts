@@ -110,7 +110,8 @@ describe("settings guidance", () => {
 
   /**
    * The bump reminder is configured through the same command as everything else, so an
-   * administrator who reads `/reminder` never needs a second place to look.
+   * administrator who reads `/reminder` never needs a second place to look. The reply
+   * trigger lives there too: it is another thing the bot does on its own.
    */
   it("exposes every bump reminder setting under the automation area", () => {
     for (const name of [
@@ -118,6 +119,7 @@ describe("settings guidance", () => {
       "automation-bump-reminder-delay",
       "automation-bump-channel",
       "automation-bump-ping-role",
+      "automation-reply-on-reply",
     ]) {
       expect(SETTINGS.find((candidate) => candidate.name === name)?.area).toBe("automation");
     }

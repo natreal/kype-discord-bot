@@ -128,15 +128,19 @@ export default defineSlashCommand({
 });
 
 /**
- * `/admin deploy` — registers this server's commands on demand.
+ * `/admin deploy` — publishes the command payload on demand.
  *
  * This exists because "automatic" still needs an escape hatch. A server whose
  * commands were removed by hand, a deployment that failed while the bot was
  * offline, or a permission problem that has since been fixed should be repairable
  * from inside Discord, without restarting the bot and without shell access.
  *
- * It deploys to *this* server only, and it verifies afterwards: the reply states
- * what Discord actually holds, not merely that a request returned 200.
+ * It follows the *configured scope*, exactly like startup, and it verifies
+ * afterwards: the reply states what Discord actually holds, not merely that a
+ * request returned 200. Deploying into this guild's own scope regardless of the
+ * configured one is what used to leave every command listed twice — a global
+ * registration plus a guild copy — so a manual deploy now removes those leftovers
+ * as part of the same action.
  */
 async function handleDeploy(
   interaction: ChatInputCommandInteraction,
@@ -156,7 +160,7 @@ async function handleDeploy(
   const force = interaction.options.getBoolean("force") ?? false;
   const deployment = context.deployment;
 
-  const result = await deployment.deployToGuild({ id: guild.id, name: guild.name }, "manual", {
+  const result = await deployment.deployForGuild({ id: guild.id, name: guild.name }, "manual", {
     force,
   });
 
@@ -185,15 +189,21 @@ async function handleDeploy(
       ? await deployment.verifyGlobal()
       : await deployment.verifyGuild(guild.id);
 
-  const embed = brandedEmbed("Command deployment")
-    .setDescription(
-      result.skipped
+  const summary =
+    result.action === "global"
+      ? result.cleared > 0
+        ? `Published application-wide and removed **${result.cleared}** guild-scoped duplicate(s) from this server.`
+        : "Published application-wide. This server reads the global registration, so nothing is registered here."
+      : result.skipped
         ? "This server already had the current commands, so nothing was re-registered."
-        : `Registered **${result.commands}** command(s) in this server.`,
-    )
+        : `Registered **${result.commands}** command(s) in this server.`;
+
+  const embed = brandedEmbed("Command deployment")
+    .setDescription(summary)
     .addFields(
       { name: "Commands", value: String(result.commands), inline: true },
-      { name: "Scope", value: context.appConfig.discord.deployScope, inline: true },
+      { name: "Scope", value: deployScope, inline: true },
+      { name: "Duplicates removed", value: String(result.cleared), inline: true },
       {
         name: "Verified",
         value:
@@ -206,9 +216,10 @@ async function handleDeploy(
       },
     )
     .setFooter({
-      text: result.skipped
-        ? "Use `force: True` to re-register regardless."
-        : "Commands may take a few seconds to appear in the client.",
+      text:
+        result.skipped && result.action !== "global"
+          ? "Use `force: True` to re-register regardless."
+          : "Commands may take a few seconds to appear in the client. If they still look duplicated, reload the client (Ctrl+R).",
     });
 
   await interaction.editReply({ embeds: [embed] });

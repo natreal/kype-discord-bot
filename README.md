@@ -381,7 +381,7 @@ Deployment then happens at startup, when the bot joins a server, and on demand:
 
 | Command                        | Purpose                                                   |
 | ------------------------------ | --------------------------------------------------------- |
-| `/admin deploy`                | Register this server's commands now, and verify them       |
+| `/admin deploy`                | Publish the commands per the configured scope, and verify  |
 | `npm run deploy:commands`      | Register from a shell (the same service the runtime uses)  |
 | `npm run deploy:guilds`        | Deploy to every guild, and repair whatever is behind       |
 | `npm run deploy:missing`       | Deploy only to guilds whose commands are out of date       |
@@ -401,6 +401,12 @@ If a server already lists every command twice, `COMMANDS_DEPLOY_SCOPE=global` is
 enough on its own: it stops new guild copies from being written but leaves the existing
 ones, which are separate objects from the global ones. `npm run deploy:clear-guilds`
 removes them and verifies the result.
+
+`/admin deploy` repairs this in place. It used to register the payload in the guild's
+own scope whatever the configured scope was, which under `global` created exactly the
+duplicate that made every command appear twice; it now follows the configured scope and
+clears stale guild copies as part of the same action, then reports what changed
+(`Duplicates removed`).
 
 **Scope.** `global` (the default) registers each command once, application-wide.
 `global+guilds` also publishes per guild: the global registration is the baseline
@@ -487,7 +493,7 @@ Useful in-Discord tooling:
 | -------------------- | ----------------------------------------------------------- |
 | `/admin invite`      | Show the invite link for either profile                     |
 | `/admin permissions` | List critical permissions the bot is missing in this server |
-| `/admin deploy`      | Register this server's commands now, and verify the result  |
+| `/admin deploy`      | Publish the commands per the configured scope, then verify |
 
 ---
 
@@ -505,6 +511,8 @@ Useful in-Discord tooling:
 | `/settings reset`    | utility  | Return an area (or everything) to defaults (owner-only)   |
 | `/maintenance`       | utility  | Pause or resume commands, tickets and AI replies          |
 | `/reminder`          | utility  | Personal timers; bump-again reminders after a Disboard bump |
+| `/stop`              | utility  | Shut the bot down gracefully (owner only)                  |
+| `/restart`           | utility  | Restart the bot through its supervisor (owner only)         |
 | `/ticket`            | tickets  | Open tickets; staff queue, panel and categories           |
 | `/diagnostics`       | utility  | Health report: core, permissions, resources, config, perf |
 | `/ping`              | core     | Liveness, gateway latency and database latency            |
@@ -513,7 +521,7 @@ Useful in-Discord tooling:
 | `/serverinfo`        | utility  | Guild statistics plus stored bot configuration            |
 | `/admin invite`      | utility  | Pre-configured invite link for either permission profile  |
 | `/admin permissions` | utility  | Critical permissions missing in this server               |
-| `/admin deploy`      | utility  | Register this server's commands on demand, then verify    |
+| `/admin deploy`      | utility  | Publish the commands per the configured scope, then verify |
 
 ### Maintenance mode
 
@@ -583,6 +591,39 @@ a row replace the earlier timer rather than stacking two pings. The trigger is
 structural — the configured bot (Disboard by default) plus the `bump` interaction name
 — not text matching, so ordinary messages from that bot never start a timer.
 
+### Replying to the bot
+
+A member can talk to the bot by **replying directly to one of its messages**, without
+typing the keyword: the reply itself is the address. The keyword still works
+everywhere (`kype ban @someone`), and is stripped when it happens to be there
+(`kype ban @someone` in a reply arrives at the agent as `ban @someone`).
+
+The behaviour needs the AI module to be enabled for the server, obeys the same
+hourly rate limit, and is switched off with:
+
+```
+/settings set area:automation setting:automation-reply-on-reply value:false
+```
+
+Only a *reply to the bot* counts — a plain message that merely mentions it, or content
+that quotes it, does not — so the bot never answers in a thread it was not addressed
+in.
+
+### Stopping and restarting the bot
+
+Both are owner-only (God Access, the server owner, or the application owner according
+to Discord) and both take an optional `reason` that is written to the log.
+
+- `/stop` closes the Discord session and the database pool, then exits. Nothing brings
+  the bot back: start it again with the launcher (`npm run bot:start`, `Start-Bot.cmd`
+  or the desktop icon).
+- `/restart` does the same and tells the supervisor to bring it back. It writes
+  `.run/restart.request` before shutting down; `scripts/windows/supervisor.ps1` and
+  `scripts/desktop/supervisor.sh` see that marker, delete it and relaunch, and the
+  bot clears any stale marker of its own on the next boot. A restart without a
+  supervisor is refused rather than obeyed — a bot that stops and never returns is
+  worse than an error message.
+
 ---
 
 ## Project structure
@@ -594,7 +635,7 @@ src/
 ├── client/                   # intents and Discord client factory
 ├── commands/                 # discovery, registry, definitions
 │   ├── core/                 # /ping, /about
-│   └── utility/              # /help, /serverinfo, /setup, /settings, /diagnostics
+│   └── utility/              # /help, /serverinfo, /setup, /settings, /stop, /restart
 ├── config/                   # env loading, Zod validation, typed config
 ├── diagnostics/              # V3 health checks (registry + report)
 │   ├── diagnostic.registry.ts   # register / runAll / runCategory
@@ -1397,13 +1438,28 @@ distributable rather than merely runnable:
 - a `200` is verified by reading each guild's live command scope back, so a command
   deleted by hand in server settings is repaired — and a server that is *still*
   incomplete is named in the log rather than assumed healthy;
-- `/admin deploy` fixes one server from inside Discord, and
+- `/admin deploy` fixes one server from inside Discord — following the configured
+  scope, and clearing any guild-scoped duplicate it finds — and
   `npm run deploy:guilds` / `deploy:missing` do it from a shell — all through the
   same service the runtime uses, so the automatic and manual paths cannot disagree;
 - `deployment.*` diagnostics report the mode, this server's coverage, and which
   servers are behind;
 - failures are bounded and honest: retries only on `429`/`5xx`, never on a `4xx`, no
   throw path, and startup is never blocked by Discord being unreachable.
+
+Delivered in V7 — **operator ergonomics**, the things that were only fixable with a
+shell or a restart before:
+
+- reminder system: personal timers in `/reminder`, and a bump-again reminder two hours
+  after a Disboard bump, both persisted in `scheduled_tasks` so they survive a restart;
+- `/stop` and `/restart` from inside Discord, both going through the same orderly
+  teardown a `SIGTERM` triggers. A restart is a marker the supervisor reads, so it is
+  the *process owner* that relaunches the bot, not a command that exits and hopes;
+- answering a **reply** to one of the bot's messages, so a member does not have to
+  retype the keyword to continue a conversation;
+- `/admin deploy` now follows the configured scope and clears the guild-scoped copy
+  that used to make every command appear twice — the bug a manual deploy was creating
+  while appearing to succeed.
 
 Suggested next phases, in dependency order. Each one is now mostly _module_ work,
 because the configuration, authorization, audit and diagnostics plumbing exists:

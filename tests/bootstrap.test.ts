@@ -87,6 +87,31 @@ describe("bootstrap wiring", () => {
     expect(source).not.toContain("rest.put(");
   });
 
+  it("routes /stop and /restart through the bootstrap's own teardown", async () => {
+    const app = await readFile(fromProjectRoot("src", "app.ts"), "utf8");
+    const interactionCreate = await readFile(
+      fromProjectRoot("src", "events", "interaction-create.ts"),
+      "utf8",
+    );
+
+    // One construction, one teardown: the command must not be able to close the
+    // process in a way the signal path does not know about, and it must not call
+    // `process.exit` itself.
+    expect(app).toContain("new ProcessControlService(");
+    expect(app).toContain("process: processControl,");
+    expect(app).toContain("await shutdownResources({ client, container, logger })");
+    expect(interactionCreate).toContain("process: services.process,");
+  });
+
+  it("answers a reply to the bot, not only a keyword message", async () => {
+    const source = await readFile(fromProjectRoot("src", "events", "message-create.ts"), "utf8");
+
+    // The reply is its own trigger: a member who answers a bot message has already
+    // named it, and requiring the keyword there is the bug this guards.
+    expect(source).toContain("message.mentions.repliedUser?.id === message.client.user?.id");
+    expect(source).toContain("replyRequest(content, { repliedToBot, trigger })");
+  });
+
   it("declares every CLI flag it reads", async () => {
     const source = await readFile(fromProjectRoot("scripts", "deploy-commands.ts"), "utf8");
 

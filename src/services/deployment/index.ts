@@ -3,6 +3,7 @@ export {
   canonicalize,
   describeError,
   fingerprintOf,
+  guildScopesToClear,
   isRetryable,
   statusOf,
   type DeployScope,
@@ -11,6 +12,7 @@ export {
   type DeploymentReport,
   type DeploymentRest,
   type GuildDeploymentResult,
+  type ManualDeploymentOutcome,
   type VerifyResult,
 } from "./command-deployment.service.js";
 export {

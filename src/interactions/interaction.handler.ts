@@ -57,6 +57,7 @@ import type { CommandDeploymentService } from "../services/deployment/index.js";
 import type { AiGateway } from "../services/ai/ai.gateway.js";
 import type { AiSettingsService } from "../services/ai/ai-settings.service.js";
 import type { AiMemoryService } from "../modules/ai/ai-memory.service.js";
+import type { ProcessControlService } from "../services/process/index.js";
 import type {
   AutomodContextServices,
   CommandExecutionContext,
@@ -179,6 +180,8 @@ export interface InteractionHandlerDeps {
   readonly aiSettings?: AiSettingsService;
   /** Guild-scoped AI memory service; optional so a minimal harness compiles. */
   readonly aiMemory?: AiMemoryService;
+  /** Process control for `/stop` and `/restart`; optional so a minimal harness compiles. */
+  readonly process?: ProcessControlService;
 }
 
 export class InteractionHandler {
@@ -861,6 +864,7 @@ export class InteractionHandler {
       ai: this.deps.ai ?? null,
       aiSettings: this.deps.aiSettings ?? null,
       aiMemory: this.deps.aiMemory ?? null,
+      process: this.deps.process ?? null,
       uptimeMs: Date.now() - this.deps.startedAt,
     };
   }

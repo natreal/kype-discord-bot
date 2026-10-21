@@ -116,6 +116,51 @@ export interface VerifyResult {
   readonly failed: readonly string[];
 }
 
+/**
+ * What a manual deployment of one guild actually did.
+ *
+ * A manual `/admin deploy` is not a single API call any more: the outcome depends
+ * on the scope, and on whether the guild still held copies from an earlier
+ * `global+guilds` deployment. The operator-facing reply is built from this, so it
+ * can state what changed instead of assuming "a PUT returned 200, therefore this
+ * server is correct" — the assumption that left every command listed twice.
+ */
+export interface ManualDeploymentOutcome {
+  /** The scope the deployment targeted. */
+  readonly scope: DeployScope;
+  /**
+   * `register` — the guild received the payload in its own scope.
+   * `global` — the payload was published application-wide instead, and the guild
+   * scope is empty by design.
+   * `none` — nothing was needed.
+   */
+  readonly action: "register" | "global" | "none";
+  /** True when Discord was written to (the guild scope, or the global scope). */
+  readonly ok: boolean;
+  /** Number of commands published in this run. */
+  readonly commands: number;
+  /** True when the guild already held the payload and nothing was written. */
+  readonly skipped: boolean;
+  /** Guild-scoped copies removed because a global deployment must not have any. */
+  readonly cleared: number;
+  /** Why the deployment failed, when it did. */
+  readonly reason?: string;
+}
+
+/**
+ * @returns the scopes a manual deployment of one guild has to clean up.
+ *
+ * Whatever scope the operator configured, a guild scope that still holds a copy
+ * of commands the bot also publishes globally is a duplicate in the picker, and a
+ * manual deployment is exactly the moment an operator asks for that to be fixed.
+ * `global` publishes application-wide, and `global+guilds` is the scope that
+ * *creates* the doubling in the first place — both are cleaned. Only `dev-guild`
+ * is left alone: it must never touch a guild other than the development one.
+ */
+export function guildScopesToClear(scope: DeployScope): DeployScope[] {
+  return scope === "dev-guild" ? [] : ["global"];
+}
+
 export class CommandDeploymentService {
   private readonly options: Required<
     Pick<CommandDeploymentOptions, "concurrency" | "maxRetries" | "retryBaseMs">
@@ -270,6 +315,95 @@ export class CommandDeploymentService {
         attempts: this.options.maxRetries + 1,
         reason,
       };
+    }
+  }
+
+  /**
+   * Deploys the configured scope for a single guild, on request.
+   *
+   * This is what `/admin deploy` calls, and it exists because the old behaviour —
+   * "PUT the payload into this guild's scope, whatever the scope is configured to
+   * be" — was wrong in the most visible way possible: under `global` the commands
+   * are already published application-wide, so the extra guild-scoped copy made
+   * Discord list every command twice in that server. A manual deployment now
+   * honours the configured scope exactly like startup does, and repairs the
+   * leftovers of the old behaviour as part of the same action.
+   *
+   * - `global` — publishes application-wide, then clears the guild scope.
+   * - `global+guilds` — publishes to the guild *and* removes the guild copy, because
+   *   that combination is the one that produces duplicates (see `scope`).
+   * - `dev-guild` — publishes in the development guild only.
+   */
+  public async deployForGuild(
+    guild: DeployableGuild,
+    source: DeploymentSource,
+    options: { force?: boolean } = {},
+  ): Promise<ManualDeploymentOutcome> {
+    const scope = this.scope;
+    const cleared = await this.clearStaleGuildCopies(guild, guildScopesToClear(scope));
+
+    if (scope === "global") {
+      const global = await this.deployGlobally();
+      return {
+        scope,
+        action: "global",
+        ok: global.ok,
+        commands: global.ok ? this.globalBody().length : 0,
+        // "Skipped" means nothing was written *for this guild*, which is the truth
+        // under a global scope: the registration that serves it is application-wide.
+        skipped: true,
+        cleared,
+        ...(global.reason === undefined ? {} : { reason: global.reason }),
+      };
+    }
+
+    const target =
+      scope === "dev-guild" && this.options.devGuildId ? this.options.devGuildId : guild.id;
+    const result = await this.deployToGuild({ id: target, name: guild.name }, source, options);
+    return {
+      scope,
+      action: result.ok ? "register" : "none",
+      ok: result.ok,
+      commands: result.commands,
+      skipped: result.skipped,
+      cleared,
+      ...(result.reason === undefined ? {} : { reason: result.reason }),
+    };
+  }
+
+  /**
+   * Clears a guild's command scope when a deployment scope says it must be empty.
+   *
+   * Bounded and honest: a guild that is already clean costs one GET, and a clear
+   * that fails is reported (`"skipped"`) rather than retried, because the reason is
+   * almost always a permission problem the operator needs to see.
+   */
+  private async clearStaleGuildCopies(
+    guild: DeployableGuild,
+    scopes: readonly DeployScope[],
+  ): Promise<number> {
+    if (!scopes.includes("global")) {
+      return 0;
+    }
+    try {
+      const existing = await this.fetchGuildCommands(guild.id);
+      if (existing.length === 0) {
+        return 0;
+      }
+      this.logger.warn("Clearing guild-scoped command copies that duplicate the global scope", {
+        guildId: guild.id,
+        name: guild.name,
+        count: existing.length,
+        impact: "These copies made every command appear twice in this server.",
+      });
+      const result = await this.clearGuildScope(guild.id);
+      return result.ok ? existing.length : 0;
+    } catch (error) {
+      this.logger.warn("Could not inspect the guild command scope", {
+        guildId: guild.id,
+        reason: describeError(error),
+      });
+      return 0;
     }
   }
 

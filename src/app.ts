@@ -41,10 +41,16 @@ import {
 } from "./services/authorization/index.js";
 import { AuditEventService, PrismaAuditEventRepository } from "./services/audit/index.js";
 import { MaintenanceService } from "./services/maintenance/index.js";
+import { ProcessControlService } from "./services/process/index.js";
 import { BUILT_IN_DIAGNOSTICS, DiagnosticRegistry } from "./diagnostics/index.js";
 import { createLogger, type Logger } from "./services/logger/index.js";
 import { ConsoleSink } from "./services/logger/sinks.js";
 import { watchStopRequest } from "./runtime/stop-request.js";
+import {
+  clearRestartRequest,
+  isRestartRequested,
+  RESTART_EXIT_CODE,
+} from "./runtime/restart-request.js";
 import { LoggerModerationLogPort } from "./modules/logging/moderation-log.port.js";
 import {
   ModerationLogSink,
@@ -779,6 +785,30 @@ export async function createApplication(): Promise<Application> {
     logger,
   });
 
+  /**
+   * Process control: the one way `/stop` and `/restart` can touch this process.
+   *
+   * It is created before the services object because the commands reach it through
+   * that object, and it is wired to the *same* teardown the SIGTERM path uses, so a
+   * command cannot invent a second shutdown that skips `client.destroy()`.
+   *
+   * `container` is referenced lazily inside the callbacks: the container exists by
+   * construction above, but a process-control request can only arrive after
+   * `container.set(services)`, which is what makes the late read safe rather than
+   * clever.
+   */
+  const processControl = new ProcessControlService({
+    logger,
+    startedAt,
+    shutdown: async (reason) => {
+      logger.info("Shutting down", { reason });
+      await shutdownResources({ client, container, logger });
+    },
+    exit: (code) => {
+      process.exit(code);
+    },
+  });
+
   const services = {
     config,
     logger,
@@ -882,6 +912,8 @@ export async function createApplication(): Promise<Application> {
     createAiAgent,
     /** The shared tool registry, for building the active menu in events. */
     aiRegistry,
+    /** Process control for `/stop` and `/restart`. */
+    process: processControl,
     startedAt,
   };
   container.set(services);
@@ -1055,13 +1087,25 @@ export async function main(): Promise<void> {
   // launcher and the deployment script request a graceful stop through a file.
   // Registered before `start()` so a stop during a slow boot is still orderly.
   watchStopRequest({ onStop: () => handleStop("stop-request") });
+
+  // `/restart` writes this marker before it shuts down. Removing it here is what
+  // keeps the *next* boot honest: a marker left behind would make the following
+  // manual stop look like a restart request. The supervisor removes its own copy
+  // too — whichever runs first wins, and both tolerate the file being gone.
+  clearRestartRequest();
+
   process.on("unhandledRejection", (reason) => {
     logger.error("Unhandled promise rejection", reason);
   });
   process.on("uncaughtException", (error) => {
     logger.error("Uncaught exception", error);
+    // A deliberate `/restart` exits through the same teardown; if something throws
+    // while it runs, this handler must not turn the restart into a plain crash with
+    // a success exit code. The marker is authoritative: it says the process must
+    // come back, so the exit code says so as well.
+    const restarting = isRestartRequested();
     void shutdown("uncaughtException").then(() => {
-      process.exit(1);
+      process.exit(restarting ? RESTART_EXIT_CODE : 1);
     });
   });
 

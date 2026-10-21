@@ -31,6 +31,7 @@ $SupPidFile = Join-Path $RunDir "supervisor.pid"
 $LockDir    = Join-Path $RunDir "lock"
 $BuildMarker= Join-Path $RunDir ".built"
 $StopRequest= Join-Path $RunDir "stop.request"
+$RestartRequest = Join-Path $RunDir "restart.request"
 
 New-Item -ItemType Directory -Force -Path $RunDir, $LogDir | Out-Null
 
@@ -291,6 +292,13 @@ while ($true) {
 
   # An orderly stop was requested while the bot was down (or during the previous
   # backoff sleep): leave instead of starting a bot that is about to be stopped.
+  # A restart marker — from `/restart`, or left behind by a relaunch that crashed
+  # before starting — must not be mistaken for that: it means "come back", so it is
+  # cleared and the loop continues.
+  if (Test-Path $RestartRequest) {
+    Write-Log "Restart marker present before launch; relaunching."
+    Remove-Item $RestartRequest, $StopRequest -ErrorAction SilentlyContinue
+  }
   if (Test-Path $StopRequest) {
     Write-Log "Stop requested; supervisor exiting without starting the bot."
     Remove-Item $StopRequest -ErrorAction SilentlyContinue
@@ -326,11 +334,33 @@ while ($true) {
   # the launcher's `stop` complete. Without this check, a graceful shutdown would
   # turn into an immediate restart.
   if (Test-Path $StopRequest) {
-    Write-Log "Bot stopped on request; supervisor exiting."
+    # A restart marker wins over the stop marker: `/restart` writes it precisely so
+    # that this deliberate exit brings the bot back instead of leaving it down.
+    $restartRequested = Test-Path $RestartRequest
     Remove-Item $StopRequest -ErrorAction SilentlyContinue
-    Remove-Item $PidFile, $SupPidFile -ErrorAction SilentlyContinue
-    Release-Lock
-    exit 0
+    if ($restartRequested) {
+      $why = $null
+      try {
+        $why = (Get-Content $RestartRequest -Raw -ErrorAction Stop | ConvertFrom-Json).requestedBy
+      } catch {
+        $why = $null
+      }
+      Remove-Item $RestartRequest -ErrorAction SilentlyContinue
+      if ($why) {
+        Write-Log "Restart requested by $why; relaunching."
+      } else {
+        Write-Log "Restart requested; relaunching."
+      }
+      # Falls through to the relaunch below rather than exiting: the supervisor is
+      # already the process that knows how to start the bot properly, and starting a
+      # second supervisor would fight this one over the instance lock.
+      $Backoff = 1
+    } else {
+      Write-Log "Bot stopped on request; supervisor exiting."
+      Remove-Item $PidFile, $SupPidFile -ErrorAction SilentlyContinue
+      Release-Lock
+      exit 0
+    }
   }
 
   Write-Log "Bot exited with code $exitCode. Restarting in ${Backoff}s."

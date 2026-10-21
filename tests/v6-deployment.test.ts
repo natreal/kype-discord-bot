@@ -846,3 +846,81 @@ describe("V6 deployment > guild create honours the scope", () => {
     expect(shouldDeployGuildCommandsOnJoin("dev-guild")).toBe(false);
   });
 });
+
+/**
+ * `/admin deploy` used to register the payload in the guild's own scope *whatever
+ * the configured scope was*. Under `global` that is a second, independent copy of
+ * every command, so Discord listed every command twice in that server — the exact
+ * symptom this suite guards against. These tests pin the corrected behaviour.
+ */
+describe("V6 deployment > manual deploy follows the configured scope", () => {
+  /** @returns the routes a fake REST client received, in order. */
+  function routesOf(puts: { route: string }[]): string[] {
+    return puts.map((entry) => entry.route);
+  }
+
+  it("clears the guild copy instead of writing one under a global scope", async () => {
+    const { service, puts, getResponses } = harness({ scope: "global" });
+    // A guild that still holds copies from an earlier `global+guilds` deployment.
+    getResponses.set(GUILD_A, [{ name: "ping" }, { name: "ban" }]);
+
+    const outcome = await service.deployForGuild(guildA, "manual");
+
+    expect(outcome.scope).toBe("global");
+    expect(outcome.action).toBe("global");
+    expect(outcome.ok).toBe(true);
+    expect(outcome.cleared).toBe(2);
+    // The duplicate is cleared first, then the global payload is republished: a
+    // clear after the publish would leave a window where the picker shows both.
+    expect(routesOf(puts)).toEqual([
+      `/applications/123456789012345678/guilds/${GUILD_A}/commands`,
+      `/applications/123456789012345678/commands`,
+    ]);
+    // The clear is an empty body: it removes the duplicate, it does not add one.
+    expect(puts[0]?.body).toEqual([]);
+  });
+
+  it("does not write an empty guild scope when the guild is already clean", async () => {
+    const { service, puts } = harness({ scope: "global" });
+
+    const outcome = await service.deployForGuild(guildA, "manual");
+
+    expect(outcome.cleared).toBe(0);
+    expect(routesOf(puts)).toEqual([`/applications/123456789012345678/commands`]);
+  });
+
+  it("removes the duplicate a global+guilds deployment creates", async () => {
+    const { service, puts } = harness({ scope: "global+guilds" });
+
+    const outcome = await service.deployForGuild(guildA, "manual");
+
+    // `global+guilds` is what produced the doubling; a manual deploy repairs it
+    // rather than reproducing it.
+    expect(outcome.scope).toBe("global+guilds");
+    expect(outcome.action).toBe("register");
+    expect(outcome.commands).toBe(2);
+    expect(routesOf(puts)).toContain(`/applications/123456789012345678/guilds/${GUILD_A}/commands`);
+  });
+
+  it("registers in the development guild only for a dev-guild scope", async () => {
+    const { service, puts } = harness({ scope: "dev-guild", devGuildId: GUILD_B });
+
+    const outcome = await service.deployForGuild(guildA, "manual");
+
+    expect(outcome.action).toBe("register");
+    // The dev guild receives the payload; the guild the command was run in does not.
+    expect(routesOf(puts)).toEqual([`/applications/123456789012345678/guilds/${GUILD_B}/commands`]);
+  });
+
+  it("reports a failed global registration instead of claiming success", async () => {
+    const { service, failures } = harness({ scope: "global" });
+
+    // The fake matches failures on the route. The global route carries no guild id,
+    // so it is matched by the client id it does contain.
+    failures.set("123456789012345678", new Error("401 Unauthorized"));
+    const outcome = await service.deployForGuild(guildA, "manual");
+
+    expect(outcome.ok).toBe(false);
+    expect(outcome.reason).toContain("401");
+  });
+});

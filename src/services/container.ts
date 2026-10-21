@@ -16,6 +16,7 @@ import type { PermissionService } from "./permissions/index.js";
 import type { AuthorizationService } from "./authorization/index.js";
 import type { PermissionClassStore } from "./authorization/index.js";
 import type { MaintenanceService } from "./maintenance/index.js";
+import type { ProcessControlService } from "./process/index.js";
 import type { AuditEventService } from "./audit/index.js";
 import type { SetupService } from "../modules/setup.service.js";
 import type { CommandRegistry } from "../commands/command.registry.js";
@@ -167,6 +168,14 @@ export interface AppServices {
   readonly createAiAgent: (guild: Guild, logger: Logger) => AiAgentService;
   /** The tool registry (shared), so events can build the active menu. */
   readonly aiRegistry: AiToolRegistry;
+  /**
+   * Process control, for `/stop` and `/restart`.
+   *
+   * Exposed on the container because the commands run inside the process they are
+   * asking to stop: this service is how they reach the bootstrap's orderly shutdown
+   * and exit path instead of calling `process.exit()` themselves.
+   */
+  readonly process: ProcessControlService;
 }
 
 /**

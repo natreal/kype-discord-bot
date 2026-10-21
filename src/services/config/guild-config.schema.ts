@@ -273,6 +273,16 @@ export const automationConfigSchema = nested(
      * Disboard's public bot.
      */
     bumpBotId: snowflakeSchema.default("302050872383242240"),
+    /**
+     * Whether a member can talk to the bot by replying to one of its messages.
+     *
+     * On by default, because the opposite is the surprising behaviour: a bot that
+     * answers `kype …` in a channel but ignores you the moment you reply to its own
+     * message looks broken, not configurable. Only *replies to the bot* qualify — the
+     * AI rate limit and the enable switch still apply, so this cannot be used to make
+     * the bot talk at every message that mentions it.
+     */
+    replyOnReply: z.boolean().default(true),
   }),
 );
 

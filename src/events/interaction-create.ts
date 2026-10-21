@@ -52,6 +52,8 @@ export default defineEvent({
       ai: services.ai,
       aiSettings: services.aiSettings,
       aiMemory: services.aiMemory,
+      // `/stop` and `/restart` go through the bootstrap's own teardown, never around it.
+      process: services.process,
       startedAt: services.startedAt,
     };
 

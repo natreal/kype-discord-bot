@@ -36,6 +36,36 @@ export function startsWithKeyword(content: string, keyword: string): string | nu
   return after.trim();
 }
 /**
+ * @returns the request carried by a message that *replies to the bot*, or `null`
+ * when the message is not such a reply.
+ *
+ * A member answering a bot message already named it: requiring `kype …` there is the
+ * reason "I reply to it and nothing happens" is a bug report at all. The reply is
+ * therefore its own trigger, and the content minus a leading keyword is what the
+ * agent receives — so `/`-less `kype ban @x` in a reply does not reach the model as
+ * the literal word "kype".
+ *
+ * Pure on purpose: the caller decides whether the replied-to author is the bot, so
+ * this stays testable without a Discord client.
+ */
+export function replyRequest(
+  content: string,
+  options: { readonly repliedToBot: boolean; readonly trigger: string },
+): string | null {
+  if (!options.repliedToBot) {
+    return null;
+  }
+  const text = content.trim();
+  // An empty reply is an empty request, not a reason to answer "…". Discord reports a
+  // media-only reply this way.
+  if (text.length === 0) {
+    return null;
+  }
+  const remainder = startsWithKeyword(text, options.trigger);
+  return remainder ?? text;
+}
+
+/**
  * Synonym → intent mapping.
  *
  * The model is reliable at *choosing* from a menu but unreliable at reading a

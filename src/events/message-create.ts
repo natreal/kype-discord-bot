@@ -24,6 +24,7 @@ import type { AppServices } from "../services/container.js";
 import { AiAgentService } from "../modules/ai/ai-agent.service.js";
 import {
   intentNote,
+  replyRequest,
   resolveIntent,
   resolveTrigger,
   startsWithKeyword,
@@ -191,10 +192,16 @@ async function maybeInvokeAi(message: Message<true>, services: AppServices): Pro
   const trigger = resolveTrigger(config.ai.trigger, services.config.ai.defaultTrigger);
   const content = message.content;
 
-  // Keyword must be a whole word at the very start of the message. This avoids
-  // false positives like "kype…" or a message that merely contains "kype" mid
-  // sentence — the agent wakes only for an explicit address.
-  const remainder = startsWithKeyword(content, trigger);
+  // Two ways to address the bot, and they are not the same thing:
+  //   - the keyword, which must be a whole word at the very start (`kype ban @x`),
+  //     so "kypex" or a mid-sentence mention never fires the agent;
+  //   - a direct reply to one of the bot's own messages, where the member has already
+  //     named it by replying to it. Requiring the keyword there too is the reason
+  //     "I replied to it and nothing happened" is a support question at all.
+  const repliedToBot =
+    config.automation.replyOnReply && message.mentions.repliedUser?.id === message.client.user?.id;
+  const reply = replyRequest(content, { repliedToBot, trigger });
+  const remainder = reply ?? startsWithKeyword(content, trigger);
   if (remainder === null) {
     return;
   }

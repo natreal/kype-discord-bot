@@ -296,6 +296,16 @@ export const SETTINGS = [
     area: "automation",
     description: "Role pinged with the bump reminder (a role ID, or empty for none).",
   },
+  {
+    name: "automation-bump-bot",
+    area: "automation",
+    description: "The bot whose messages count as bumps (the Disboard bot ID).",
+  },
+  {
+    name: "automation-reply-on-reply",
+    area: "automation",
+    description: "Answer when a member replies directly to one of the bot's messages.",
+  },
 ] as const;
 
 type SettingName = (typeof SETTINGS)[number]["name"];
@@ -712,6 +722,10 @@ function buildPatch(name: SettingName, raw: string): Record<string, unknown> {
         automation: { bumpPingRoleId: trimmed.length === 0 ? null : parseSnowflake(trimmed) },
       };
     }
+    case "automation-reply-on-reply":
+      return { automation: { replyOnReply: parseBoolean(raw) } };
+    case "automation-bump-bot":
+      return { automation: { bumpBotId: parseSnowflake(raw) } };
     default:
       return { members: { welcomeMessage: raw } };
   }

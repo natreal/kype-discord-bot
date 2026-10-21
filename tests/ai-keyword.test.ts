@@ -3,7 +3,7 @@
  */
 import { describe, expect, it } from "vitest";
 
-import { resolveTrigger, startsWithKeyword } from "../src/modules/ai/keyword.js";
+import { replyRequest, resolveTrigger, startsWithKeyword } from "../src/modules/ai/keyword.js";
 
 describe("resolveTrigger", () => {
   it("prefers the guild override over the process default", () => {
@@ -31,5 +31,25 @@ describe("startsWithKeyword", () => {
 
   it("ignores a keyword that is a prefix of a longer word", () => {
     expect(startsWithKeyword("kypex est ici", "kype")).toBeNull();
+  });
+});
+
+describe("replyRequest", () => {
+  it("treats a reply to the bot as an address, keyword or not", () => {
+    expect(replyRequest("et maintenant ?", { repliedToBot: true, trigger: "kype" })).toBe(
+      "et maintenant ?",
+    );
+  });
+
+  it("strips a leading keyword so the model never sees it as part of the request", () => {
+    expect(replyRequest("kype ban @x", { repliedToBot: true, trigger: "kype" })).toBe("ban @x");
+  });
+
+  it("stays inert when the message does not reply to the bot", () => {
+    expect(replyRequest("et maintenant ?", { repliedToBot: false, trigger: "kype" })).toBeNull();
+  });
+
+  it("ignores an empty reply rather than answering nothing", () => {
+    expect(replyRequest("   ", { repliedToBot: true, trigger: "kype" })).toBeNull();
   });
 });
