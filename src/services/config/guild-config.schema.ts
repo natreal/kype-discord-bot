@@ -225,11 +225,54 @@ export const ticketConfigSchema = nested(
   }),
 );
 
-/** Automation module configuration. */
+/**
+ * Automation module configuration.
+ *
+ * Also the home of the bump reminder, because a bump reminder *is* automation: it
+ * reacts to an event and acts later, without a member asking. Keeping it here rather
+ * than in a `reminders` section avoids a second switch for the same idea, and keeps
+ * `/settings` to one page for "things the bot does on its own".
+ */
 export const automationConfigSchema = nested(
   z.object({
     enabled: z.boolean().default(false),
     timezone: z.string().trim().min(1).default("UTC"),
+    /**
+     * Whether a Disboard bump schedules a "bump again" reminder.
+     *
+     * Off by default: a server that never bumps should not discover the feature by
+     * being pinged. Independent of `automation.enabled`, so an operator can use bump
+     * reminders without switching on the rule engine. `bumpChannelId` is optional —
+     * the channel the bump was posted in is used when it is unset.
+     */
+    bumpReminderEnabled: z.boolean().default(false),
+    /**
+     * How long after a bump the reminder fires, in seconds (default 2h, the Disboard
+     * cooldown). A function rather than a literal so an operator can nudge it a minute
+     * past the real cooldown, when Discord has already accepted the next bump.
+     */
+    bumpReminderDelaySeconds: z
+      .number()
+      .int()
+      .min(60)
+      .max(48 * 60 * 60)
+      .default(2 * 60 * 60),
+    /** Where the reminder is posted. `null` means "not configured yet". */
+    bumpChannelId: snowflakeSchema.nullable().default(null),
+    /**
+     * Role pinged when the member who bumped has left, or `null`. Optional because a
+     * small server may simply want the announcement in a channel.
+     */
+    bumpPingRoleId: snowflakeSchema.nullable().default(null),
+    /**
+     * Bot whose messages count as bumps.
+     *
+     * Configurable rather than hardcoded: Disboard has more than one bot id in the
+     * wild (the staging instance, regional deployments), and a hardcoded id would
+     * silently stop reminding servers the day Disboard changes it. The default is
+     * Disboard's public bot.
+     */
+    bumpBotId: snowflakeSchema.default("302050872383242240"),
   }),
 );
 

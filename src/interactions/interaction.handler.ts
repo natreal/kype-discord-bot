@@ -70,6 +70,7 @@ import { isAppError, NotFoundError, toError, userFacingMessage } from "../utils/
 import { errorEmbed } from "../utils/presenters.js";
 import { TICKET_IDS } from "../modules/tickets/index.js";
 import type { TicketService } from "../modules/tickets/ticket.service.js";
+import type { ReminderService } from "../modules/reminders/index.js";
 
 /**
  * Interactions that carry a guild member and can therefore be gated.
@@ -152,6 +153,13 @@ export interface InteractionHandlerDeps {
   readonly createAutomodContext: (guild: Guild, logger: Logger) => AutomodContextServices;
   /** Builds the guild-bound ticket collaborators. */
   readonly createTicketContext: (guild: Guild, logger: Logger) => TicketContextServices;
+  /**
+   * Builds the guild-bound reminder service for `/reminder`.
+   *
+   * Optional: a harness that never runs `/reminder` need not wire it, and the command
+   * then reports "unavailable" instead of throwing at construction.
+   */
+  readonly remindersForGuild?: (guild: Guild, logger: Logger) => ReminderService | null;
   /** Builds the guild-bound backup service. */
   readonly createBackupService: (guild: Guild, logger: Logger) => BackupService;
   /**
@@ -843,6 +851,9 @@ export class InteractionHandler {
       security,
       automod,
       tickets: this.deps.createTicketContext(interaction.guild, logger),
+      // Only built when the interaction is in a guild and the process was wired with a
+      // reminder service; `/reminder` is guild-only, so `null` is the honest answer.
+      reminders: this.deps.remindersForGuild?.(interaction.guild, logger) ?? null,
       backup,
       deployment,
       guildConfig,

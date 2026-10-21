@@ -28,6 +28,7 @@ import type { AiGateway } from "../services/ai/ai.gateway.js";
 import type { AiSettingsService } from "../services/ai/ai-settings.service.js";
 import type { AiMemoryService } from "../modules/ai/ai-memory.service.js";
 import type { TicketService } from "../modules/tickets/ticket.service.js";
+import type { ReminderService } from "../modules/reminders/index.js";
 import type {
   SetupPermissionService,
   SetupResourceDefinition,
@@ -133,6 +134,13 @@ export interface CommandExecutionContext {
   readonly automod: AutomodContextServices | null;
   /** Guild-bound tickets; `null` outside a guild or when the module is unwired. */
   readonly tickets: TicketContextServices | null;
+  /**
+   * Guild-bound reminder service for `/reminder`.
+   *
+   * `null` when the process was not wired with one (a harness), and the command then
+   * refuses rather than silently doing nothing.
+   */
+  readonly reminders: ReminderService | null;
   /** Backups of this guild's structure; `null` outside a guild. */
   readonly backup: BackupService | null;
   /**
@@ -184,6 +192,8 @@ export interface CommandContextServices {
   readonly createAutomodContext: (guild: Guild, logger: Logger) => AutomodContextServices;
   /** Builds the guild-bound ticket collaborators for an invocation. */
   readonly createTicketContext: (guild: Guild, logger: Logger) => TicketContextServices;
+  /** Builds the guild-bound reminder service for `/reminder`. */
+  readonly remindersForGuild: ((guild: Guild, logger: Logger) => ReminderService | null) | null;
   /** Snapshot storage, shared by `/backup` and the periodic worker. */
   readonly backup: BackupService | null;
   /** Slash-command deployment, shared with startup and `guildCreate`. */

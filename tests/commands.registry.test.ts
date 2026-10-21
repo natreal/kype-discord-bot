@@ -62,6 +62,7 @@ describe("CommandRegistry", () => {
       "mute",
       "ping",
       "purge",
+      "reminder",
       "roles",
       "security",
       "serverinfo",

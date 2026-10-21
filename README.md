@@ -504,6 +504,7 @@ Useful in-Discord tooling:
 | `/settings set`      | utility  | Change one setting (validated before it is persisted)     |
 | `/settings reset`    | utility  | Return an area (or everything) to defaults (owner-only)   |
 | `/maintenance`       | utility  | Pause or resume commands, tickets and AI replies          |
+| `/reminder`          | utility  | Personal timers; bump-again reminders after a Disboard bump |
 | `/ticket`            | tickets  | Open tickets; staff queue, panel and categories           |
 | `/diagnostics`       | utility  | Health report: core, permissions, resources, config, perf |
 | `/ping`              | core     | Liveness, gateway latency and database latency            |
@@ -546,6 +547,41 @@ private channel visible to the opener and to the ticket's staff roles.
   per category rule still applies.
 
 See **[docs/PERMISSIONS.md](docs/PERMISSIONS.md)** for the full audience table.
+
+### Reminders
+
+`/reminder set duration:<duration> text:<what>` pings the member **in the channel where
+they ran the command**, once, when the timer ends. `duration` accepts compound and
+worded forms (`30m`, `1h30m`, `2 hours 15 min`, `2 days`); a bare number is refused
+because `30` cannot be told apart from half an hour. Reminders last between 1 minute
+and 30 days.
+
+- `/reminder list` shows the caller's pending timers; `/reminder cancel id:<id>`
+  cancels one and `/reminder clear` cancels all of them. Both are scoped to the
+  caller, so an id cannot be used to read or cancel somebody else's timer.
+- Setting the same reminder text again replaces the previous one instead of stacking a
+  duplicate, so re-running the command is harmless.
+- Reminders are rows in `scheduled_tasks` (kind `reminder.fire`). Nothing lives in
+  memory, so a restart resumes them, they appear in `/scheduler list` and they are
+  cancellable from there too.
+
+**Bump reminder.** When Disboard confirms a `/bump`, the bot can post a "bump again"
+reminder once the cooldown has passed (2 hours by default):
+
+```
+/settings set area:automation setting:automation-bump-channel value:#bumps
+/settings set area:automation setting:automation-bump-reminder-enabled value:true
+/settings set area:automation setting:automation-bump-reminder-delay value:7200
+/settings set area:automation setting:automation-bump-ping-role value:@Bumpers
+```
+
+The reminder pings the member who bumped; if they have left, it pings the configured
+role instead (or posts without a mention when no role is set). `automation-bump-channel`
+defaults to the channel the bump was posted in, so nothing has to be configured before
+switching the feature on. Only one bump reminder is pending per server, so two bumps in
+a row replace the earlier timer rather than stacking two pings. The trigger is
+structural — the configured bot (Disboard by default) plus the `bump` interaction name
+— not text matching, so ordinary messages from that bot never start a timer.
 
 ---
 

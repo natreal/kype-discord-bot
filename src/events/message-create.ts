@@ -42,6 +42,13 @@ const aiRateWindows = new Map<string, { readonly start: number; count: number }>
 export default defineEvent({
   name: "messageCreate",
   execute: async (message, { services }) => {
+    // Bots are the *bumpers* here, so this runs before the bot filter below. It is
+    // cheap (one string comparison against the configured id) and must not fall
+    // through to automod, which deliberately ignores bots.
+    if (message.inGuild()) {
+      await maybeScheduleBumpReminder(message, services);
+    }
+
     if (!message.inGuild() || message.author.bot || message.system) {
       return;
     }
@@ -90,6 +97,68 @@ export default defineEvent({
     }
   },
 });
+
+/**
+ * Schedules the "bump again" reminder when a Disboard bump is observed.
+ *
+ * Disboard's reply wording differs by language and changes over time, so the bump is
+ * identified structurally rather than by copy:
+ *
+ * 1. the author is the configured bump bot (`automation.bumpBotId`);
+ * 2. the message answers a slash command named `bump` (its interaction metadata);
+ * 3. the guild enabled bump reminders.
+ *
+ * The command-name check is what keeps the *other* Disboard messages — `/search`,
+ * listing edits, vote thank-yous — from starting a two-hour timer.
+ *
+ * Failures are logged and swallowed: bump detection must never break message handling,
+ * which still has automod to run afterwards.
+ */
+async function maybeScheduleBumpReminder(
+  message: Message<true>,
+  services: AppServices,
+): Promise<void> {
+  try {
+    const { automation } = await services.guildConfig.get(message.guild.id);
+    // Two guards before any work: the feature is off, or this is not the configured
+    // bump bot. Both are the overwhelmingly common case, so they come first.
+    if (!automation.bumpReminderEnabled || message.author.id !== automation.bumpBotId) {
+      return;
+    }
+    // A bump reply *is* the answer to `/bump`. A payload without the metadata cannot be
+    // confirmed, and guessing would let any message from that bot start a timer.
+    // `interactionMetadata` carries no command name in this discord.js version, so the
+    // deprecated `interaction` accessor is the only source for it.
+    const interaction = message.interactionMetadata;
+    if (message.interaction?.commandName !== "bump" || interaction === null) {
+      return;
+    }
+    // Falling back to the channel the bump happened in keeps the feature usable before
+    // an operator picks a dedicated channel; `/settings` can move it afterwards.
+    const channelId = automation.bumpChannelId ?? message.channelId;
+
+    const reminders = services.remindersForGuild(message.guild, services.logger);
+    if (!reminders) {
+      return;
+    }
+
+    await reminders.scheduleBumpReminder({
+      guildId: message.guild.id,
+      // The invoker is the bumper, not the bot that replied: the bot's id would ping
+      // Disboard itself, which is the one mention nobody wants.
+      bumperId: interaction.user.id,
+      channelId,
+      delaySeconds: automation.bumpReminderDelaySeconds,
+      roleId: automation.bumpPingRoleId,
+    });
+  } catch (error) {
+    services.logger.warn("Could not schedule the bump reminder", {
+      guildId: message.guild.id,
+      messageId: message.id,
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
+}
 
 /**
  * Wakes the keyword agent when a message is addressed to it.

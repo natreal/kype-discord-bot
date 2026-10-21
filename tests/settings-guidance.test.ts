@@ -96,6 +96,7 @@ describe("settings guidance", () => {
       "members",
       "language",
       "tickets",
+      "automation",
     ]) {
       expect(areas.has(area)).toBe(true);
     }
@@ -105,6 +106,21 @@ describe("settings guidance", () => {
     const setting = SETTINGS.find((candidate) => candidate.name === "tickets-member-limit");
 
     expect(setting?.area).toBe("tickets");
+  });
+
+  /**
+   * The bump reminder is configured through the same command as everything else, so an
+   * administrator who reads `/reminder` never needs a second place to look.
+   */
+  it("exposes every bump reminder setting under the automation area", () => {
+    for (const name of [
+      "automation-bump-reminder-enabled",
+      "automation-bump-reminder-delay",
+      "automation-bump-channel",
+      "automation-bump-ping-role",
+    ]) {
+      expect(SETTINGS.find((candidate) => candidate.name === name)?.area).toBe("automation");
+    }
   });
 
   /**

@@ -28,6 +28,7 @@ import type { BackupService } from "../modules/backup/index.js";
 import type { SchedulerService } from "../modules/scheduler/scheduler.service.js";
 import type { RoleService } from "../modules/roles/index.js";
 import type { MemberOnboardingService } from "../modules/members/index.js";
+import type { ReminderService } from "../modules/reminders/index.js";
 import type { ModerationSweeper } from "../modules/moderation/moderation.sweeper.js";
 import type { CommandDeploymentService } from "./deployment/index.js";
 import type { AiGateway } from "./ai/ai.gateway.js";
@@ -144,6 +145,14 @@ export interface AppServices {
    * configuration on every call, so `/settings` takes effect immediately.
    */
   readonly membersForGuild: (guildId: string) => MemberOnboardingService | null;
+  /**
+   * Guild-bound reminder service, for `/reminder` and the Disboard bump detector.
+   *
+   * Resolved per guild because delivering a reminder is a Discord operation on a
+   * specific guild, and the bump settings are read from that guild's configuration.
+   * `null` when the bot is not in the guild.
+   */
+  readonly remindersForGuild: (guild: Guild, logger: Logger) => ReminderService | null;
   /** The expired-punishment sweeper, so `guildCreate` schedules it per guild. */
   readonly moderationSweeper: ModerationSweeper;
   /** Epoch milliseconds of process start, used for uptime reporting. */

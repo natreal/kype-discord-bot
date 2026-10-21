@@ -40,6 +40,7 @@ const AREAS = [
   "security",
   "members",
   "tickets",
+  "automation",
 ] as const;
 
 type Area = (typeof AREAS)[number];
@@ -274,6 +275,26 @@ export const SETTINGS = [
     name: "tickets-member-limit",
     area: "tickets",
     description: "How many open tickets one member may have at a time (1-25).",
+  },
+  {
+    name: "automation-bump-reminder-enabled",
+    area: "automation",
+    description: 'Post a "bump again" reminder after a Disboard bump.',
+  },
+  {
+    name: "automation-bump-reminder-delay",
+    area: "automation",
+    description: "Seconds after a bump before the reminder fires (60 to 172800).",
+  },
+  {
+    name: "automation-bump-channel",
+    area: "automation",
+    description: "The channel the bump reminder is posted in (a channel ID).",
+  },
+  {
+    name: "automation-bump-ping-role",
+    area: "automation",
+    description: "Role pinged with the bump reminder (a role ID, or empty for none).",
   },
 ] as const;
 
@@ -676,6 +697,21 @@ function buildPatch(name: SettingName, raw: string): Record<string, unknown> {
       return { tickets: { staffRoleId: parseSnowflake(raw) } };
     case "tickets-member-limit":
       return { tickets: { memberTicketLimit: parseNumber(raw) } };
+    case "automation-bump-reminder-enabled":
+      return { automation: { bumpReminderEnabled: parseBoolean(raw) } };
+    case "automation-bump-reminder-delay":
+      return { automation: { bumpReminderDelaySeconds: parseNumber(raw) } };
+    case "automation-bump-channel":
+      return { automation: { bumpChannelId: parseSnowflake(raw) } };
+    case "automation-bump-ping-role": {
+      // An empty value clears the ping, which is the common case: a server may want
+      // the announcement without pinging anyone. `parseSnowflake` rejects empty input,
+      // so `null` is handled before it rather than by loosening the parser.
+      const trimmed = raw.trim();
+      return {
+        automation: { bumpPingRoleId: trimmed.length === 0 ? null : parseSnowflake(trimmed) },
+      };
+    }
     default:
       return { members: { welcomeMessage: raw } };
   }

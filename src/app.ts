@@ -69,6 +69,11 @@ import {
   DiscordMemberOnboardingActions,
   MemberOnboardingService,
 } from "./modules/members/index.js";
+import {
+  createReminderTaskHandlers,
+  DiscordReminderActions,
+  ReminderService,
+} from "./modules/reminders/index.js";
 import { AutomodService } from "./modules/automod/automod.service.js";
 import {
   DiscordSecurityActions,
@@ -588,6 +593,46 @@ export async function createApplication(): Promise<Application> {
   };
 
   /**
+   * Guild-bound reminders, cached per guild like the other modules.
+   *
+   * One adapter per guild means a reminder can never be posted to another server, and
+   * the bump settings are read at detection time (in `messageCreate`), so `/settings`
+   * takes effect on the very next bump rather than at the next restart.
+   */
+  const createReminderService = (guild: Guild, scopeLogger: Logger): ReminderService =>
+    new ReminderService({
+      scheduler,
+      actions: new DiscordReminderActions(guild),
+      logger: scopeLogger,
+    });
+
+  const reminderByGuild = new Map<string, ReminderService>();
+  const remindersFor = (guild: Guild): ReminderService => {
+    const cached = reminderByGuild.get(guild.id);
+    if (cached) {
+      return cached;
+    }
+    const service = createReminderService(guild, logger);
+    reminderByGuild.set(guild.id, service);
+    return service;
+  };
+
+  /**
+   * The `reminder.fire` and `reminder.bump` handlers.
+   *
+   * Resolved per task rather than once: the task names a guild, and a service built
+   * from one guild object at startup would be wrong for every other guild. A guild the
+   * client no longer knows about yields `null`, which the handler reports as skipped —
+   * the bot was removed, so there is nobody left to remind.
+   */
+  for (const handler of createReminderTaskHandlers((guildId) => {
+    const guild = client.guilds.cache.get(guildId);
+    return guild ? remindersFor(guild) : null;
+  })) {
+    taskRegistry.register(handler);
+  }
+
+  /**
    * The `role.expire` handler.
    *
    * Resolved per task rather than once: the task names a guild, and a handler bound
@@ -819,6 +864,12 @@ export async function createApplication(): Promise<Application> {
       const guild = client.guilds.cache.get(guildId);
       return guild ? membersFor(guild) : null;
     },
+    /**
+     * Resolves the guild-bound reminder service, for `/reminder` and the bump detector.
+     * Takes the guild rather than an id because both callers already hold one.
+     */
+    remindersForGuild: (guild: Guild) =>
+      client.guilds.cache.has(guild.id) ? remindersFor(guild) : null,
     /** The sweeper, so `guildCreate` can schedule it for a newly joined server. */
     moderationSweeper,
     /** Process-wide AI gateway; unconfigured when no provider is set. */
