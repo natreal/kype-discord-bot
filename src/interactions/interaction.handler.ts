@@ -58,6 +58,7 @@ import type { AiGateway } from "../services/ai/ai.gateway.js";
 import type { AiSettingsService } from "../services/ai/ai-settings.service.js";
 import type { AiMemoryService } from "../modules/ai/ai-memory.service.js";
 import type { ProcessControlService } from "../services/process/index.js";
+import type { GuildLeaveService } from "../services/guild/index.js";
 import type {
   AutomodContextServices,
   CommandExecutionContext,
@@ -182,6 +183,8 @@ export interface InteractionHandlerDeps {
   readonly aiMemory?: AiMemoryService;
   /** Process control for `/stop` and `/restart`; optional so a minimal harness compiles. */
   readonly process?: ProcessControlService;
+  /** Guild leaving for `/leave`; optional so a minimal harness compiles. */
+  readonly guildLeave?: GuildLeaveService;
 }
 
 export class InteractionHandler {
@@ -865,6 +868,7 @@ export class InteractionHandler {
       aiSettings: this.deps.aiSettings ?? null,
       aiMemory: this.deps.aiMemory ?? null,
       process: this.deps.process ?? null,
+      guildLeave: this.deps.guildLeave ?? null,
       uptimeMs: Date.now() - this.deps.startedAt,
     };
   }

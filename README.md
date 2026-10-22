@@ -513,6 +513,7 @@ Useful in-Discord tooling:
 | `/reminder`          | utility  | Personal timers; bump-again reminders after a Disboard bump |
 | `/stop`              | utility  | Shut the bot down gracefully (owner only)                  |
 | `/restart`           | utility  | Restart the bot through its supervisor (owner only)         |
+| `/leave`             | utility  | Make the bot leave this server (owner only)                 |
 | `/ticket`            | tickets  | Open tickets; staff queue, panel and categories           |
 | `/diagnostics`       | utility  | Health report: core, permissions, resources, config, perf |
 | `/ping`              | core     | Liveness, gateway latency and database latency            |
@@ -624,6 +625,18 @@ to Discord) and both take an optional `reason` that is written to the log.
   supervisor is refused rather than obeyed — a bot that stops and never returns is
   worse than an error message.
 
+### Leaving a server
+
+`/leave` makes the bot leave the server the command was run in. It is bot-owner only
+(God Access or Discord's application owner), takes an optional `reason`, and records
+the outcome in the audit trail. The ephemeral reply is sent *before* the leave, so
+the operator sees a confirmation instead of an unanswered interaction, and a refused
+leave is reported while the bot keeps serving every other server.
+
+Stored configuration and history are retained, exactly as for any other removal:
+re-inviting the bot runs the idempotent setup again and reuses the stored settings
+rather than starting from defaults.
+
 ---
 
 ## Project structure
@@ -635,7 +648,7 @@ src/
 ├── client/                   # intents and Discord client factory
 ├── commands/                 # discovery, registry, definitions
 │   ├── core/                 # /ping, /about
-│   └── utility/              # /help, /serverinfo, /setup, /settings, /stop, /restart
+│   └── utility/              # /help, /serverinfo, /setup, /settings, /stop, /restart, /leave
 ├── config/                   # env loading, Zod validation, typed config
 ├── diagnostics/              # V3 health checks (registry + report)
 │   ├── diagnostic.registry.ts   # register / runAll / runCategory
@@ -1455,6 +1468,8 @@ shell or a restart before:
 - `/stop` and `/restart` from inside Discord, both going through the same orderly
   teardown a `SIGTERM` triggers. A restart is a marker the supervisor reads, so it is
   the *process owner* that relaunches the bot, not a command that exits and hopes;
+- `/leave`, so the operator can remove the bot from one server from inside Discord —
+  reply first, then leave, with the refusal reported rather than swallowed;
 - answering a **reply** to one of the bot's messages, so a member does not have to
   retype the keyword to continue a conversation;
 - `/admin deploy` now follows the configured scope and clears the guild-scoped copy

@@ -42,6 +42,7 @@ import {
 import { AuditEventService, PrismaAuditEventRepository } from "./services/audit/index.js";
 import { MaintenanceService } from "./services/maintenance/index.js";
 import { ProcessControlService } from "./services/process/index.js";
+import { GuildLeaveService } from "./services/guild/index.js";
 import { BUILT_IN_DIAGNOSTICS, DiagnosticRegistry } from "./diagnostics/index.js";
 import { createLogger, type Logger } from "./services/logger/index.js";
 import { ConsoleSink } from "./services/logger/sinks.js";
@@ -914,6 +915,8 @@ export async function createApplication(): Promise<Application> {
     aiRegistry,
     /** Process control for `/stop` and `/restart`. */
     process: processControl,
+    /** Guild leaving for `/leave`, with the reply-flush grace period built in. */
+    guildLeave: new GuildLeaveService({ logger }),
     startedAt,
   };
   container.set(services);

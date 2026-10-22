@@ -18,6 +18,7 @@ import type { AuthorizationService } from "../services/authorization/index.js";
 import type { PermissionClassStore } from "../services/authorization/index.js";
 import type { MaintenanceService } from "../services/maintenance/index.js";
 import type { ProcessControlService } from "../services/process/index.js";
+import type { GuildLeaveService } from "../services/guild/index.js";
 import type { DiagnosticRegistry } from "../diagnostics/index.js";
 import type { ModerationService } from "../modules/moderation/moderation.service.js";
 import type { GuildMemberActions } from "../modules/moderation/member-actions.js";
@@ -174,6 +175,13 @@ export interface CommandExecutionContext {
    * refuse: a stop is not something to simulate.
    */
   readonly process: ProcessControlService | null;
+  /**
+   * Leaving the current guild, for `/leave`.
+   *
+   * `null` when the process was not wired with it (a harness); the command then
+   * refuses rather than reaching for the client's guild cache itself.
+   */
+  readonly guildLeave: GuildLeaveService | null;
   /** Milliseconds since the process started; used by `/ping`. */
   readonly uptimeMs: number;
 }
@@ -216,4 +224,6 @@ export interface CommandContextServices {
   readonly maintenance: MaintenanceService | null;
   /** Process control, for `/stop` and `/restart` (absent = not wired in this process). */
   readonly process: ProcessControlService | null;
+  /** Guild leaving, for `/leave` (absent = not wired in this process). */
+  readonly guildLeave: GuildLeaveService | null;
 }

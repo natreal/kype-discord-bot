@@ -54,6 +54,8 @@ export default defineEvent({
       aiMemory: services.aiMemory,
       // `/stop` and `/restart` go through the bootstrap's own teardown, never around it.
       process: services.process,
+      // `/leave` uses the service so the reply is flushed before the bot leaves.
+      guildLeave: services.guildLeave,
       startedAt: services.startedAt,
     };
 

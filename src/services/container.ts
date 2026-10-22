@@ -17,6 +17,7 @@ import type { AuthorizationService } from "./authorization/index.js";
 import type { PermissionClassStore } from "./authorization/index.js";
 import type { MaintenanceService } from "./maintenance/index.js";
 import type { ProcessControlService } from "./process/index.js";
+import type { GuildLeaveService } from "./guild/index.js";
 import type { AuditEventService } from "./audit/index.js";
 import type { SetupService } from "../modules/setup.service.js";
 import type { CommandRegistry } from "../commands/command.registry.js";
@@ -176,6 +177,14 @@ export interface AppServices {
    * and exit path instead of calling `process.exit()` themselves.
    */
   readonly process: ProcessControlService;
+  /**
+   * Guild leaving, for `/leave`.
+   *
+   * Exposed on the container for the same reason as process control: the command
+   * must not call `guild.leave()` itself, so the grace period that lets the reply
+   * reach Discord stays in one tested place.
+   */
+  readonly guildLeave: GuildLeaveService;
 }
 
 /**

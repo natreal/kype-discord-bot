@@ -58,6 +58,7 @@ describe("CommandRegistry", () => {
       "help",
       "history",
       "kick",
+      "leave",
       "maintenance",
       "mute",
       "ping",
