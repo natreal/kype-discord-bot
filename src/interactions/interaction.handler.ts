@@ -73,6 +73,7 @@ import { errorEmbed } from "../utils/presenters.js";
 import { TICKET_IDS } from "../modules/tickets/index.js";
 import type { TicketService } from "../modules/tickets/ticket.service.js";
 import type { ReminderService } from "../modules/reminders/index.js";
+import type { RepositoryMonitorService } from "../modules/repository/index.js";
 
 /**
  * Interactions that carry a guild member and can therefore be gated.
@@ -162,6 +163,14 @@ export interface InteractionHandlerDeps {
    * then reports "unavailable" instead of throwing at construction.
    */
   readonly remindersForGuild?: (guild: Guild, logger: Logger) => ReminderService | null;
+  /**
+   * The process-wide repository monitor, for `/github`.
+   *
+   * Optional for the same reason as the reminder service: a harness that never runs
+   * the command need not wire it, and the command then says so instead of throwing
+   * at construction.
+   */
+  readonly repositoryMonitor?: RepositoryMonitorService | null;
   /** Builds the guild-bound backup service. */
   readonly createBackupService: (guild: Guild, logger: Logger) => BackupService;
   /**
@@ -861,6 +870,8 @@ export class InteractionHandler {
       // reminder service; `/reminder` is guild-only, so `null` is the honest answer.
       reminders: this.deps.remindersForGuild?.(interaction.guild, logger) ?? null,
       backup,
+      // V9: process-wide, so it is forwarded as-is rather than built per guild.
+      repositoryMonitor: this.deps.repositoryMonitor ?? null,
       deployment,
       guildConfig,
       maintenance: this.deps.maintenance ?? null,

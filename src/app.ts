@@ -142,6 +142,14 @@ import {
   PrismaAiGuildMemoryRepository,
   TicketAiActions,
 } from "./modules/ai/index.js";
+import { GitHubClient } from "./services/github/client.js";
+import { RepositoryProbe } from "./services/anyps5/repository.probe.js";
+import {
+  DiscordRepositoryReport,
+  PrismaRepositoryMonitorRepository,
+  RepositoryMonitorService,
+  RepositoryRefresher,
+} from "./modules/repository/index.js";
 
 /**
  * Intents enabled by default.
@@ -811,6 +819,77 @@ export async function createApplication(): Promise<Application> {
     },
   });
 
+  /**
+   * V9: the repository monitor.
+   *
+   * Built once per process, because it watches a *deployment-wide* repository
+   * rather than a guild's data. The probe is the only component that knows the
+   * GitHub endpoints; the service owns the history and the event rules; the report
+   * adapter owns Discord. Wiring them here — and not inside the module — keeps the
+   * module free of the client and the container free of GitHub specifics.
+   */
+  const githubClient = new GitHubClient({
+    ...(config.repository.token === undefined ? {} : { token: config.repository.token }),
+  });
+  const [repositoryOwner = "", repositoryName = ""] = config.repository.fullName.split("/");
+  const repositoryProbe = new RepositoryProbe({
+    client: githubClient,
+    target: { owner: repositoryOwner, repo: repositoryName, branch: undefined },
+  });
+
+  const repositoryMonitor: RepositoryMonitorService = new RepositoryMonitorService({
+    repository: new PrismaRepositoryMonitorRepository(database.prisma),
+    probe: repositoryProbe,
+    // A function, not the adapter: the adapter is built on the next line and reads
+    // the monitor's own history. Calling through a closure keeps the two
+    // constructions acyclic and the dependency visible at the call site.
+    report: {
+      publish: (reading, previous, events) =>
+        repositoryReport.publish(reading, previous, events),
+    },
+    logger,
+  });
+
+  const repositoryReport: DiscordRepositoryReport = new DiscordRepositoryReport({
+    client,
+    logger,
+    channelId: config.repository.reportChannelId,
+    history: () => repositoryMonitor.history(),
+  });
+
+  const repositoryRefresher = new RepositoryRefresher({
+    scheduler,
+    monitor: repositoryMonitor,
+    intervalMinutes: config.repository.intervalMinutes,
+  });
+  taskRegistry.register(repositoryRefresher.handler());
+
+  /**
+   * Schedules the refresh for a process-wide job.
+   *
+   * `scheduled_tasks.guildId` is a foreign key and the job belongs to no server, so
+   * it is filed under the first guild the bot can see (see `repositoryGuildId`).
+   * With no guild there is no valid row: the monitor then keeps recording nothing
+   * rather than registering a task the scheduler would reject.
+   *
+   * The first run is one minute out, not one interval out, so a restart does not
+   * leave an hour-long hole in the history.
+   */
+  const startRepositoryMonitor = async (): Promise<void> => {
+    if (client.guilds.cache.size === 0) {
+      logger.warn("The repository monitor is idle: the bot is not in any guild yet", {
+        repository: config.repository.fullName,
+      });
+      return;
+    }
+    await repositoryRefresher.ensureScheduled(60);
+    logger.info("Repository monitor scheduled", {
+      repository: config.repository.fullName,
+      intervalMinutes: config.repository.intervalMinutes,
+      reportChannelId: config.repository.reportChannelId,
+    });
+  };
+
   const services = {
     config,
     logger,
@@ -904,6 +983,10 @@ export async function createApplication(): Promise<Application> {
       client.guilds.cache.has(guild.id) ? remindersFor(guild) : null,
     /** The sweeper, so `guildCreate` can schedule it for a newly joined server. */
     moderationSweeper,
+    /** V9: the GitHub repository monitor, shared by the task and `/github`. */
+    repositoryMonitor,
+    /** Schedules the hourly refresh once the scheduler is running. */
+    startRepositoryMonitor,
     /** Process-wide AI gateway; unconfigured when no provider is set. */
     ai: aiGateway,
     /** Global provider settings, editable at runtime by the owner. */

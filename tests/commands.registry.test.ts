@@ -55,6 +55,7 @@ describe("CommandRegistry", () => {
       "backup",
       "ban",
       "diagnostics",
+      "github",
       "help",
       "history",
       "kick",

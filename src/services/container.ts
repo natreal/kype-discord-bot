@@ -32,6 +32,7 @@ import type { RoleService } from "../modules/roles/index.js";
 import type { MemberOnboardingService } from "../modules/members/index.js";
 import type { ReminderService } from "../modules/reminders/index.js";
 import type { ModerationSweeper } from "../modules/moderation/moderation.sweeper.js";
+import type { RepositoryMonitorService } from "../modules/repository/index.js";
 import type { CommandDeploymentService } from "./deployment/index.js";
 import type { AiGateway } from "./ai/ai.gateway.js";
 import type { AiSettingsService } from "./ai/ai-settings.service.js";
@@ -157,6 +158,16 @@ export interface AppServices {
   readonly remindersForGuild: (guild: Guild, logger: Logger) => ReminderService | null;
   /** The expired-punishment sweeper, so `guildCreate` schedules it per guild. */
   readonly moderationSweeper: ModerationSweeper;
+  /**
+   * The GitHub repository monitor (V9).
+   *
+   * Exposed so `clientReady` schedules it and `/github` reads the stored history
+   * through the same service the hourly task writes with — one construction path,
+   * so the command can never report a different series than the bot records.
+   */
+  readonly repositoryMonitor: RepositoryMonitorService;
+  /** Creates the recurring refresh task, once the scheduler is about to start. */
+  readonly startRepositoryMonitor: () => Promise<void>;
   /** Epoch milliseconds of process start, used for uptime reporting. */
   readonly startedAt: number;
   /** Process-wide AI gateway: model levels, retry, budget and cost logging. */

@@ -173,6 +173,56 @@ export const envSchema = z.object({
    * wording, so no register is hard-coded into the prompt.
    */
   AI_PERSONA: optionalString.describe("Default persona/tone added to the assistant system prompt."),
+
+  /**
+   * The GitHub repository the monitor watches, as `owner/name`.
+   *
+   * Empty (or absent) means "the AnyPS5 project", which is what this feature was
+   * built for. It is configurable because the monitor itself is generic — it reads
+   * `progress.json` from the project's Pages host and falls back to commits and
+   * pull requests only — and because a fork or a mirror should be watchable
+   * without a code change.
+   */
+  GITHUB_REPOSITORY: optionalString
+    .pipe(
+      z
+        .string()
+        .regex(/^[\w.-]+\/[\w.-]+$/, "must be written as owner/repository")
+        .optional(),
+    )
+    .describe("Repository to monitor, as owner/repository."),
+
+  /**
+   * GitHub token.
+   *
+   * Optional, and the difference is a rate limit rather than a capability:
+   * anonymous requests get 60/hour, a token gets 5,000. The job uses conditional
+   * requests, so an unchanged repository costs almost nothing either way.
+   *
+   * A fine-grained token with no scopes is enough: everything read here is public.
+   * It is a credential, so it is redacted from logs and diagnostics.
+   */
+  GITHUB_TOKEN: optionalString.describe("Optional GitHub token; raises the rate limit to 5,000/h."),
+
+  /** Minutes between refreshes. The default matches AnyPS5's own CI cadence. */
+  GITHUB_POLL_INTERVAL_MINUTES: z.coerce
+    .number()
+    .int()
+    .min(1)
+    .max(1_440)
+    .default(60)
+    .describe("How often the repository monitor refreshes, in minutes."),
+
+  /**
+   * Channel the hourly report is posted to.
+   *
+   * Empty means "record the history, post nothing". That is a real use — a bot
+   * that keeps the statistics for `/github` without a notification channel — so it
+   * is not an error, only a quieter deployment.
+   */
+  GITHUB_REPORT_CHANNEL_ID: optionalString
+    .pipe(snowflake.optional())
+    .describe("Discord channel that receives the hourly repository report."),
 });
 
 /** Parsed, validated environment variables. */

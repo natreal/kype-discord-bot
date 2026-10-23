@@ -1051,3 +1051,162 @@ model AiProviderSettings {
   @@map("ai_provider_settings")
 }
 
+/// A repository the bot watches (V9).
+///
+/// One row per monitored GitHub repository. The statistics the bot reports are
+/// *not* derived here: they belong to `RepositorySnapshot`, one row per refresh.
+/// This table only holds what does not change hourly — which repository, where,
+/// and whether the hourly job should run at all.
+///
+/// `repositoryId` is GitHub's numeric id, used to detect a rename (`owner/name`
+/// changes, the id does not) without mistaking a different repository that took
+/// the old name for the same one.
+model MonitoredRepository {
+  id           String   @id @default(cuid())
+  owner        String
+  name         String
+  /// Branch the statistics describe; `null` means the repository default.
+  branch       String?
+  displayName  String?
+  /// GitHub's numeric repository id, once a refresh has learned it.
+  repositoryId Int?     @unique
+  enabled      Boolean  @default(true)
+
+  /// `ETag`s for the two list endpoints, so an unchanged repository costs no quota.
+  commitsEtag        String?
+  pullRequestsEtag   String?
+  /// Commit the first snapshot measured; later deltas are "since" this.
+  cursorCommit       String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  snapshots RepositorySnapshot[]
+  commits   RepositoryCommitRecord[]
+  pulls     RepositoryPullRequestRecord[]
+  events    RepositoryEventRecord[]
+
+  @@unique([owner, name])
+  @@index([enabled])
+  @@map("monitored_repositories")
+}
+
+/// One timestamped reading of a watched repository (V9).
+///
+/// Deliberately a *snapshot* table rather than a mutable "current state" row: the
+/// feature exists to show a trend, and a single row could never answer "how many
+/// functions were implemented last week". One row per refresh, written even when
+/// nothing changed, so a gap in the series means the bot was down or rate limited
+/// — a fact worth seeing.
+///
+/// The two percentage pairs are stored as published (`*PublishedPercent` and the
+/// six counters beside them) and are never recomputed from names here: the
+/// project's own CI owns those numbers, and a bot that recalculates them can
+/// disagree with the project's badge. `commitCount`/`pullRequestCount` are counts
+/// *in this reading's window*, not all-time totals, and are named accordingly.
+model RepositorySnapshot {
+  id             String   @id @default(cuid())
+  repositoryId   String
+  capturedAt     DateTime @default(now())
+
+  /// Nullable so a reading taken while the Pages file was unavailable still
+  /// records the commit/PR state instead of failing the whole snapshot.
+  librariesDone       Int?
+  librariesTotal      Int?
+  librariesPercent    Float?
+  shadersDone         Int?
+  shadersTotal        Int?
+  shadersPercent      Float?
+  /// `SHA` the published statistics were generated at, when the host reports it.
+  progressCommit      String?
+
+  stars       Int @default(0)
+  forks       Int @default(0)
+  openIssues  Int @default(0)
+  commitCount Int @default(0)
+  pullCount   Int @default(0)
+
+  /// The full published `progress.json`, so a per-library history can be charted
+  /// later without re-fetching old states that no longer exist.
+  progress Json?
+  /// Endpoints that failed during this reading (`["commits"]`, ...). Empty is healthy.
+  failures Json @default("[]")
+
+  repository MonitoredRepository @relation(fields: [repositoryId], references: [id], onDelete: Cascade)
+
+  @@index([repositoryId, capturedAt])
+  @@map("repository_snapshots")
+}
+
+/// A commit seen by a refresh (V9).
+///
+/// `(repositoryId, sha)` is unique, which is what makes storing a window of
+/// fifty commits on every refresh an upsert rather than a duplicate: the same
+/// commit is stored once, however many snapshots observed it.
+model RepositoryCommitRecord {
+  id           String   @id @default(cuid())
+  repositoryId String
+  sha          String
+  message      String
+  author       String?
+  committedAt  DateTime
+  url          String
+  firstSeenAt  DateTime @default(now())
+
+  repository MonitoredRepository @relation(fields: [repositoryId], references: [id], onDelete: Cascade)
+
+  @@unique([repositoryId, sha])
+  @@index([repositoryId, committedAt])
+  @@map("repository_commits")
+}
+
+/// A pull request seen by a refresh (V9).
+///
+/// `state`/`merged` are updated in place: a pull request opened as a draft and
+/// merged two days later must not appear as three different rows, and the merge is
+/// the event worth announcing.
+model RepositoryPullRequestRecord {
+  id           String   @id @default(cuid())
+  repositoryId String
+  number       Int
+  title        String
+  author       String?
+  state        String
+  draft        Boolean  @default(false)
+  merged       Boolean  @default(false)
+  createdAt    DateTime
+  mergedAt     DateTime?
+  url          String
+  firstSeenAt  DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  repository MonitoredRepository @relation(fields: [repositoryId], references: [id], onDelete: Cascade)
+
+  @@unique([repositoryId, number])
+  @@index([repositoryId, createdAt])
+  @@map("repository_pull_requests")
+}
+
+/// What the bot already announced for a repository (V9).
+///
+/// The hourly job is idempotent by design, but *announcements* must not be: a
+/// restart, an overlapping run or a retried task would otherwise repost the same
+/// commit. Each event carries a stable key (`commit:<sha>`, `libraries:47.39`) and
+/// is recorded here once, so "has this been shown?" is a unique index rather than
+/// a guess based on the last message.
+model RepositoryEventRecord {
+  id           String   @id @default(cuid())
+  repositoryId String
+  /// `commit`, `pull-request`, `libraries`, `shaders`, `stars`, `forks`, ...
+  kind         String
+  /// Stable identity of the event within the repository.
+  key          String
+  createdAt    DateTime @default(now())
+
+  repository MonitoredRepository @relation(fields: [repositoryId], references: [id], onDelete: Cascade)
+
+  @@unique([repositoryId, key])
+  @@index([repositoryId, createdAt])
+  @@map("repository_events")
+}
+

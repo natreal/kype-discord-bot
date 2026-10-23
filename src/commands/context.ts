@@ -31,6 +31,7 @@ import type { AiSettingsService } from "../services/ai/ai-settings.service.js";
 import type { AiMemoryService } from "../modules/ai/ai-memory.service.js";
 import type { TicketService } from "../modules/tickets/ticket.service.js";
 import type { ReminderService } from "../modules/reminders/index.js";
+import type { RepositoryMonitorService } from "../modules/repository/index.js";
 import type {
   SetupPermissionService,
   SetupResourceDefinition,
@@ -146,6 +147,14 @@ export interface CommandExecutionContext {
   /** Backups of this guild's structure; `null` outside a guild. */
   readonly backup: BackupService | null;
   /**
+   * The GitHub repository monitor (V9).
+   *
+   * Process-wide rather than guild-bound: it watches one repository for the whole
+   * deployment, and `/github` reads the stored history through the same service the
+   * hourly task writes with. `null` when the process was not wired with one.
+   */
+  readonly repositoryMonitor: RepositoryMonitorService | null;
+  /**
    * Slash-command deployment.
    *
    * Exposed so `/admin deploy` can trigger an automatic deployment on demand
@@ -226,4 +235,6 @@ export interface CommandContextServices {
   readonly process: ProcessControlService | null;
   /** Guild leaving, for `/leave` (absent = not wired in this process). */
   readonly guildLeave: GuildLeaveService | null;
+  /** The GitHub repository monitor, for `/github` (absent = not wired). */
+  readonly repositoryMonitor: RepositoryMonitorService | null;
 }

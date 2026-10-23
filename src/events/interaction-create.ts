@@ -56,6 +56,8 @@ export default defineEvent({
       process: services.process,
       // `/leave` uses the service so the reply is flushed before the bot leaves.
       guildLeave: services.guildLeave,
+      // V9: `/github` reads the history through the service the hourly task writes.
+      repositoryMonitor: services.repositoryMonitor,
       startedAt: services.startedAt,
     };
 

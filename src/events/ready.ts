@@ -119,6 +119,17 @@ async function startScheduler(services: AppServices): Promise<void> {
       }
     }
 
+    // V9: the repository monitor is a process-wide job filed under the first guild,
+    // so it is scheduled here — after guilds are reconciled and before the
+    // scheduler starts — and skipped entirely when the bot is in no guild.
+    try {
+      await services.startRepositoryMonitor();
+    } catch (error) {
+      logger.error("Could not schedule the repository monitor", error, {
+        impact: "No periodic snapshot will be taken; `/github` still reads what exists.",
+      });
+    }
+
     await services.scheduler.start();
   } catch (error) {
     logger.error("The scheduler could not be started", error, {

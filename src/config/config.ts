@@ -79,6 +79,21 @@ export interface AppConfig {
   };
 
   /**
+   * GitHub repository monitoring.
+   *
+   * `reportChannelId === null` means "record the history, post nothing": the
+   * hourly snapshot is still taken, and `/github` still answers, but the bot stays
+   * quiet. `intervalMinutes` is what the recurring task is created with, so the
+   * cadence is a deployment decision rather than a hard-coded hour.
+   */
+  readonly repository: {
+    readonly fullName: string;
+    readonly token: string | undefined;
+    readonly intervalMinutes: number;
+    readonly reportChannelId: string | null;
+  };
+
+  /**
    * Which commit this build came from, stamped by `npm run build`.
    *
    * `null` when the stamp is missing (a `tsx` dev run, a fresh clone before the
@@ -94,6 +109,16 @@ export interface AppConfig {
 }
 
 const SECRET_KEYS = ["token", "url"] as const;
+
+/**
+ * The repository the monitor watches when `GITHUB_REPOSITORY` is not set.
+ *
+ * AnyPS5, because the feature was written to track it: the statistics it reads are
+ * the project's own `progress.json`. It lives here, in the config layer, rather
+ * than in the module, so the default is visible next to the variable that
+ * overrides it.
+ */
+export const DEFAULT_REPOSITORY = "boykopovar/AnyPS5";
 
 /** Builds the public configuration object from validated environment values. */
 function buildConfig(env: Env): AppConfig {
@@ -124,6 +149,14 @@ function buildConfig(env: Env): AppConfig {
       requestTimeoutMs: env.AI_REQUEST_TIMEOUT_MS,
       defaultTrigger: env.AI_DEFAULT_TRIGGER,
       persona: env.AI_PERSONA,
+    },
+    repository: {
+      // The default is the project this monitor was written for; any other value
+      // watches whatever the operator names, with the same code.
+      fullName: env.GITHUB_REPOSITORY ?? DEFAULT_REPOSITORY,
+      token: env.GITHUB_TOKEN,
+      intervalMinutes: env.GITHUB_POLL_INTERVAL_MINUTES,
+      reportChannelId: env.GITHUB_REPORT_CHANNEL_ID ?? null,
     },
     build: readBuildInfo(),
   };
@@ -195,6 +228,14 @@ export function redactConfig(config: AppConfig): Record<string, unknown> {
       requestTimeoutMs: config.ai.requestTimeoutMs,
       defaultTrigger: config.ai.defaultTrigger,
       persona: config.ai.persona ?? null,
+    },
+    repository: {
+      fullName: config.repository.fullName,
+      // Presence only: the token is a credential, and `redactConfig` output goes to
+      // logs and diagnostics.
+      token: config.repository.token === undefined ? null : "[redacted]",
+      intervalMinutes: config.repository.intervalMinutes,
+      reportChannelId: config.repository.reportChannelId,
     },
   } satisfies Record<string, unknown>;
 }
