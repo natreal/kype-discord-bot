@@ -209,6 +209,14 @@ model PermissionClass {
   /// Stable identifier within the guild, e.g. `senior-moderator`.
   key         String
   name        String
+  /// Server-wide label used instead of `name` when displaying this power level,
+  /// e.g. rename `administrator` to "Server Leads". Nullable so `null` means "no
+  /// override" and the built-in name is used.
+  ///
+  /// Deliberately *not* `name`: `name` arrives with a stored row that also carries
+  /// `permissions`, so renaming through it would let a UI label overwrite what a
+  /// power level actually grants. Configuration and presentation stay separate.
+  displayName String?
   /// Permission identifiers granted by the class, e.g. `["moderation.ban"]`.
   permissions Json     @default("[]")
   /// Built-in classes cannot be deleted or renamed through commands.
@@ -235,6 +243,10 @@ model RolePermissionClass {
   guildId   String
   roleId    String
   classKey  String
+  /// Optional per-role display name, e.g. show a role bound to `administrator` as
+  /// "Server Leads" while other roles bound to the same class keep their own label.
+  /// Nullable: `null` means "use the power level's name".
+  label     String?
   createdAt DateTime @default(now())
 
   guild Guild @relation(fields: [guildId], references: [id], onDelete: Cascade)

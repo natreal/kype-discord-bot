@@ -21,6 +21,7 @@ import {
   PermissionClassStore,
   type PermissionClassRepository,
   type PermissionClassRow,
+  type RoleClassBinding,
 } from "../../src/services/authorization/index.js";
 import { AuditEventService, type AuditEventRecord } from "../../src/services/audit/index.js";
 import type { DatabaseService } from "../../src/services/database/index.js";
@@ -43,10 +44,10 @@ export { GOD_ACCESS_USER_ID } from "../../src/modules/setup/index.js";
 /** In-memory permission class repository. */
 export function memoryPermissionClasses(): PermissionClassRepository & {
   readonly classes: Map<string, PermissionClassRow>;
-  readonly bindings: Map<string, { guildId: string; roleId: string; classKey: string }>;
+  readonly bindings: Map<string, RoleClassBinding>;
 } {
   const classes = new Map<string, PermissionClassRow>();
-  const bindings = new Map<string, { guildId: string; roleId: string; classKey: string }>();
+  const bindings = new Map<string, RoleClassBinding>();
   const keyOf = (guildId: string, key: string): string => `${guildId}:${key}`;
 
   return {
@@ -67,15 +68,38 @@ export function memoryPermissionClasses(): PermissionClassRepository & {
       classes.delete(keyOf(guildId, key));
       return Promise.resolve();
     },
+    setClassDisplayName(row) {
+      // Mirrors the Prisma upsert: a built-in class usually has no stored row, so the
+      // override has to be able to create one.
+      const existing = classes.get(keyOf(row.guildId, row.key));
+      classes.set(
+        keyOf(row.guildId, row.key),
+        existing ? { ...existing, displayName: row.displayName } : row,
+      );
+      return Promise.resolve();
+    },
     listBindings(guildId) {
       return Promise.resolve([...bindings.values()].filter((row) => row.guildId === guildId));
     },
     bindRole(guildId, roleId, classKey) {
-      bindings.set(`${guildId}:${roleId}:${classKey}`, { guildId, roleId, classKey });
+      bindings.set(`${guildId}:${roleId}:${classKey}`, {
+        guildId,
+        roleId,
+        classKey,
+        label: null,
+      });
       return Promise.resolve();
     },
     unbindRole(guildId, roleId, classKey) {
       bindings.delete(`${guildId}:${roleId}:${classKey}`);
+      return Promise.resolve();
+    },
+    setBindingLabel(guildId, roleId, label) {
+      for (const [key, row] of bindings) {
+        if (row.guildId === guildId && row.roleId === roleId) {
+          bindings.set(key, { ...row, label });
+        }
+      }
       return Promise.resolve();
     },
   };

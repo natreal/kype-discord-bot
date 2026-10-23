@@ -315,7 +315,9 @@ describe("V3 authorization: role IDs granting permissions", () => {
 
     // Bound: the role now shows up in the store's own listing and grants tickets.
     const bindings = await store.listBindings(GUILD_A);
-    expect(bindings).toEqual([{ guildId: GUILD_A, roleId: MODERATOR_ROLE, classKey: "support" }]);
+    expect(bindings).toEqual([
+      { guildId: GUILD_A, roleId: MODERATOR_ROLE, classKey: "support", label: null },
+    ]);
     expect(await store.roleIdsGranting(GUILD_A, ["tickets.manage"])).toEqual([MODERATOR_ROLE]);
 
     await store.unbindRole(GUILD_A, MODERATOR_ROLE, "support");

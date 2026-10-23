@@ -11,6 +11,7 @@ export {
 export {
   BUILT_IN_PERMISSION_CLASSES,
   builtInPermissionClass,
+  classLabel,
   permissionsGrantedByClasses,
   type BuiltInPermissionClassKey,
   type PermissionClassDefinition,

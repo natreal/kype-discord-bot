@@ -71,6 +71,7 @@ describe("CommandRegistry", () => {
       "settings",
       "setup",
       "softban",
+      "staff",
       "stop",
       "ticket",
       "timeout",

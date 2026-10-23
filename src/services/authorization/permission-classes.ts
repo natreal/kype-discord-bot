@@ -30,6 +30,12 @@ export interface PermissionClassDefinition {
   /** Stable identifier within the guild, e.g. `senior-moderator`. */
   readonly key: string;
   readonly name: string;
+  /**
+   * Display-only override set by the owner, e.g. rename `administrator` to
+   * "Server Leads". Presentation only: it is never consulted when resolving
+   * permissions, so a rename cannot change who can do what.
+   */
+  readonly displayName?: string;
   readonly description: string;
   readonly permissions: readonly Permission[];
   /** Built-in classes cannot be deleted or renamed through commands. */
@@ -185,6 +191,29 @@ const CLASS_BY_KEY: ReadonlyMap<string, PermissionClassDefinition> = new Map(
 /** @returns the built-in class definition for `key`, or `undefined`. */
 export function builtInPermissionClass(key: string): PermissionClassDefinition | undefined {
   return CLASS_BY_KEY.get(key);
+}
+
+/**
+ * @returns the name to show for a power level, preferring the owner's rename, then
+ * an explicit per-role label, then the class's own name.
+ *
+ * Pure presentation: nothing resolves permissions through this function, so a rename
+ * or a label can never change who holds what. A blank override falls through to the
+ * next source rather than rendering an empty label.
+ */
+export function classLabel(
+  definition: { readonly name: string; readonly displayName?: string | undefined },
+  label?: string | null,
+): string {
+  const trimmedLabel = label?.trim() ?? "";
+  if (trimmedLabel.length > 0) {
+    return trimmedLabel;
+  }
+  const trimmedName = definition.displayName?.trim() ?? "";
+  if (trimmedName.length > 0) {
+    return trimmedName;
+  }
+  return definition.name;
 }
 
 /**

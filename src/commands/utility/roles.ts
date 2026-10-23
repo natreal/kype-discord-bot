@@ -11,6 +11,13 @@
  *   /roles unbind  role class       — remove a power level from a role
  *   /roles create  name [class]     — create a role, optionally bound to a class
  *   /roles delete  role             — delete a role the bot can manage
+ *   /roles rename-class class name  — rename a power level server-wide
+ *   /roles label   role name        — rename how one bound role is shown
+ *
+ * The two rename subcommands exist for `/staff`, which groups roles by power level:
+ * `rename-class` changes a heading once for the whole server ("administrator" →
+ * "Server Leads"), while `label` changes one role inside its group. Both are
+ * presentation only — neither can change what a class grants.
  *
  * The command owns no permission logic of its own. It declares `server.settings` and
  * the authorization layer decides; it reads and writes bindings through
@@ -40,11 +47,12 @@ import {
 
 import { defineSlashCommand } from "../define.js";
 import type { CommandExecutionContext } from "../context.js";
-import { brandedEmbed, errorEmbed } from "../../utils/presenters.js";
+import { brandedEmbed, errorEmbed, readRename } from "../../utils/presenters.js";
 import { ValidationError } from "../../utils/errors.js";
 import { hasGodAccess } from "../../services/authorization/index.js";
 import {
   BUILT_IN_PERMISSION_CLASSES,
+  classLabel,
   permissionsByModule,
   type Permission,
   type PermissionClassDefinition,
@@ -173,6 +181,42 @@ export default defineSlashCommand({
         .addRoleOption((option) =>
           option.setName("role").setDescription("The role to delete.").setRequired(true),
         ),
+    )
+    .addSubcommand((sub) =>
+      sub
+        .setName("rename-class")
+        .setDescription("Rename how a power level is displayed across the server.")
+        .addStringOption((option) =>
+          option
+            .setName("class")
+            .setDescription("The power level to rename.")
+            .setRequired(true)
+            .setAutocomplete(true),
+        )
+        .addStringOption((option) =>
+          option
+            .setName("name")
+            .setDescription("The new display name, or `reset` to restore the built-in one.")
+            .setRequired(true)
+            .setMaxLength(64),
+        ),
+    )
+    .addSubcommand((sub) =>
+      sub
+        .setName("label")
+        .setDescription(
+          "Rename how one bound role is displayed (e.g. Administrator → Server Leads).",
+        )
+        .addRoleOption((option) =>
+          option.setName("role").setDescription("The bound role to label.").setRequired(true),
+        )
+        .addStringOption((option) =>
+          option
+            .setName("name")
+            .setDescription("The label to show, or `reset` to clear it.")
+            .setRequired(true)
+            .setMaxLength(64),
+        ),
     ),
 
   autocomplete: async (interaction) => {
@@ -190,7 +234,7 @@ export default defineSlashCommand({
     )
       .slice(0, 25)
       .map((definition) => ({
-        name: `${definition.name} — ${definition.permissions.length} permission(s)`,
+        name: `${classLabel(definition)} — ${definition.permissions.length} permission(s)`,
         value: definition.key,
       }));
     await interaction.respond(matches);
@@ -228,6 +272,12 @@ export default defineSlashCommand({
         return;
       case "delete":
         await handleDelete(interaction, context);
+        return;
+      case "rename-class":
+        await handleRenameClass(interaction, context);
+        return;
+      case "label":
+        await handleLabel(interaction, context);
         return;
       default:
         await interaction.editReply({
@@ -367,7 +417,10 @@ async function replyWithList(
   const labels = new Map<string, string[]>();
   for (const binding of bindings) {
     const definition = classByKey.get(binding.classKey);
-    const label = definition ? definition.name : binding.classKey;
+    // A per-role label wins, then a server-wide rename, then the class's own name.
+    const label = definition
+      ? classLabel(definition, binding.label)
+      : (binding.label ?? binding.classKey);
     labels.set(binding.roleId, [...(labels.get(binding.roleId) ?? []), label]);
   }
 
@@ -409,17 +462,23 @@ async function replyWithShow(
 
   const bound = await classesForRole(context, guild.id, role.id);
   const permissions = [...new Set(bound.flatMap((definition) => definition.permissions))].sort();
+  const label = (await context.permissionClasses.listBindings(guild.id)).find(
+    (binding) => binding.roleId === role.id && binding.label !== null,
+  )?.label;
 
   const embed = brandedEmbed(`Role: ${role.name}`).addFields(
     { name: "ID", value: `\`${role.id}\``, inline: true },
     { name: "Members", value: String(role.members.size), inline: true },
     { name: "Position", value: String(role.position), inline: true },
+    ...(label ? [{ name: "Label", value: label, inline: true }] : []),
     {
       name: "Power levels",
       value:
         bound.length === 0
           ? "none bound — this role grants no bot permissions"
-          : bound.map((definition) => `${definition.name} (\`${definition.key}\`)`).join("\n"),
+          : bound
+              .map((definition) => `${classLabel(definition)} (\`${definition.key}\`)`)
+              .join("\n"),
     },
     {
       name: "Bot permissions",
@@ -547,7 +606,7 @@ async function handleBinding(
             "",
             bound.length === 0
               ? "This role now holds no power levels."
-              : `This role holds: ${bound.map((definition) => definition.name).join(", ")}`,
+              : `This role holds: ${bound.map((definition) => classLabel(definition)).join(", ")}`,
           ].join("\n"),
         ),
     ],
@@ -718,5 +777,182 @@ async function recordRoleAudit(
     targetId: roleId,
     outcome: "success",
     details: { classKey, mode },
+  });
+}
+
+/**
+ * Renames a power level server-wide, or restores its built-in name.
+ *
+ * Only the display column is written, so the class keeps exactly the permissions it
+ * had: renaming `administrator` to "Server Leads" changes what `/staff` prints and
+ * nothing about who can do what.
+ */
+async function handleRenameClass(
+  interaction: ChatInputCommandInteraction,
+  context: CommandExecutionContext,
+): Promise<void> {
+  const guild = interaction.guild;
+  const classKey = interaction.options.getString("class", true);
+  const requested = interaction.options.getString("name", true);
+  if (!guild) {
+    return;
+  }
+
+  const definition = await resolveClassDefinition(context, guild.id, classKey);
+  if (!definition) {
+    await interaction.editReply({
+      embeds: [
+        errorEmbed(
+          "Rename power level",
+          `Unknown power level \`${classKey}\`. Run \`/roles classes\` to see the available ones.`,
+        ),
+      ],
+    });
+    return;
+  }
+
+  const rename = readRename(requested, requested.trim().toLowerCase() === "reset");
+  if ("error" in rename) {
+    await interaction.editReply({ embeds: [errorEmbed("Rename power level", rename.error)] });
+    return;
+  }
+
+  await context.permissionClasses.setClassDisplayName(guild.id, definition.key, rename.name);
+  await recordLabelAudit(context, interaction, {
+    action: "roles.class.renamed",
+    targetType: "permission-class",
+    targetId: definition.key,
+    details: {
+      classKey: definition.key,
+      name: rename.name,
+      previous: definition.displayName ?? null,
+    },
+  });
+
+  await interaction.editReply({
+    embeds: [
+      new EmbedBuilder()
+        .setTitle(rename.name === null ? "Power level name restored" : "Power level renamed")
+        .setDescription(
+          [
+            `**Power level:** \`${definition.key}\``,
+            `**Display name:** ${classLabel({ ...definition, displayName: rename.name ?? undefined })}`,
+            "",
+            "Permissions are unchanged — a rename only affects how the name is shown.",
+          ].join("\n"),
+        ),
+    ],
+  });
+}
+
+/**
+ * Renames how one role is shown, or clears the label.
+ *
+ * The label lives on the role's bindings rather than on the role itself, so it can
+ * only be set for a role that already holds a power level: an unbound role has
+ * nothing to appear under in `/staff`.
+ */
+async function handleLabel(
+  interaction: ChatInputCommandInteraction,
+  context: CommandExecutionContext,
+): Promise<void> {
+  const guild = interaction.guild;
+  const requested = interaction.options.getString("name", true);
+  if (!guild) {
+    return;
+  }
+  const role = await resolveRole(interaction);
+  if (!role) {
+    await interaction.editReply({
+      embeds: [
+        errorEmbed("Role label", "That role could not be resolved — it may have been deleted."),
+      ],
+    });
+    return;
+  }
+
+  const bound = await classesForRole(context, guild.id, role.id);
+  if (bound.length === 0) {
+    await interaction.editReply({
+      embeds: [
+        errorEmbed(
+          "Role label",
+          `<@&${role.id}> holds no power level, so it does not appear under \`/staff\`. ` +
+            "Bind it first with `/roles bind`.",
+        ),
+      ],
+    });
+    return;
+  }
+
+  const rename = readRename(requested, requested.trim().toLowerCase() === "reset");
+  if ("error" in rename) {
+    await interaction.editReply({ embeds: [errorEmbed("Role label", rename.error)] });
+    return;
+  }
+
+  await context.permissionClasses.setBindingLabel(guild.id, role.id, rename.name);
+  await recordLabelAudit(context, interaction, {
+    action: "roles.role.labelled",
+    targetType: "role",
+    targetId: role.id,
+    details: { classKeys: bound.map((definition) => definition.key), label: rename.name },
+  });
+
+  await interaction.editReply({
+    embeds: [
+      new EmbedBuilder()
+        .setTitle(rename.name === null ? "Role label cleared" : "Role labelled")
+        .setDescription(
+          [
+            `**Role:** <@&${role.id}>`,
+            `**Shown as:** ${rename.name ?? `its own name (\`${role.name}\`)`}`,
+            `**Under power level(s):** ${bound
+              .map((definition) => classLabel(definition))
+              .join(", ")}`,
+          ].join("\n"),
+        ),
+    ],
+  });
+}
+
+/**
+ * @returns the class definition for `key`, including stored-only (custom) classes.
+ *
+ * `BINDABLE_CLASSES` covers every built-in, but a guild may hold a custom class that
+ * exists only in the database, and renaming must work for those too.
+ */
+async function resolveClassDefinition(
+  context: CommandExecutionContext,
+  guildId: string,
+  classKey: string,
+): Promise<PermissionClassDefinition | null> {
+  const classes = await context.permissionClasses.list(guildId);
+  return classes.find((definition) => definition.key === classKey) ?? null;
+}
+
+/** Records a display-only rename in the audit trail. */
+async function recordLabelAudit(
+  context: CommandExecutionContext,
+  interaction: ChatInputCommandInteraction,
+  entry: {
+    readonly action: string;
+    readonly targetType: string;
+    readonly targetId: string;
+    readonly details: Record<string, unknown>;
+  },
+): Promise<void> {
+  const god = hasGodAccess(interaction.user.id);
+  await context.audit.record({
+    guildId: interaction.guildId ?? "unknown",
+    action: entry.action,
+    category: "authorization",
+    severity: "privileged",
+    actorId: interaction.user.id,
+    actorKind: god ? "god" : "user",
+    targetType: entry.targetType,
+    targetId: entry.targetId,
+    outcome: "success",
+    details: entry.details,
   });
 }

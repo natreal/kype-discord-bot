@@ -25,6 +25,7 @@ import {
   type PermissionClassDefinition,
 } from "./permission-classes.js";
 import { isPermission, type Permission } from "./permissions.js";
+import { ValidationError } from "../../utils/errors.js";
 
 /** Facts about a member used to resolve implied classes. */
 export interface MemberClassFacts {
@@ -138,6 +139,9 @@ export class PermissionClassStore {
       classes.set(row.key, {
         key: row.key,
         name: row.name,
+        // The override travels with the stored row, but `name` still wins for
+        // resolution so a rename stays purely cosmetic.
+        ...(row.displayName === null ? {} : { displayName: row.displayName }),
         description: builtIn?.description ?? "Custom permission class.",
         permissions,
         // A stored row can override a built-in's permissions, but a built-in can
@@ -169,6 +173,46 @@ export class PermissionClassStore {
   }
 
   /**
+   * Renames a power level for the whole guild, or clears the override with `null`.
+   *
+   * Resolves the class first so the repository can create a row for a built-in that has
+   * never been stored. A rename still cannot change what the class grants: only
+   * `displayName` is written, and the permission list is carried along untouched.
+   *
+   * @throws `ValidationError` when the guild has no such class.
+   */
+  public async setClassDisplayName(
+    guildId: string,
+    key: string,
+    displayName: string | null,
+  ): Promise<void> {
+    const definition = (await this.list(guildId)).find((entry) => entry.key === key);
+    if (!definition) {
+      throw new ValidationError(`Unknown power level \`${key}\`.`, { key, guildId });
+    }
+    await this.repository.setClassDisplayName({
+      guildId,
+      key: definition.key,
+      name: definition.name,
+      displayName,
+      permissions: definition.permissions,
+      builtIn: definition.builtIn,
+      priority: definition.priority,
+    });
+    this.logger.info("Permission class display name set", { guildId, key, displayName });
+  }
+
+  /** Renames how one role appears, or clears the label with `null`. */
+  public async setBindingLabel(
+    guildId: string,
+    roleId: string,
+    label: string | null,
+  ): Promise<void> {
+    await this.repository.setBindingLabel(guildId, roleId, label);
+    this.logger.info("Role binding label set", { guildId, roleId, label });
+  }
+
+  /**
    * @returns every role in the guild that is bound to a class granting *any* of the
    * given permissions, de-duplicated.
    *
@@ -182,10 +226,7 @@ export class PermissionClassStore {
     guildId: string,
     permissions: readonly Permission[],
   ): Promise<string[]> {
-    const [classes, bindings] = await Promise.all([
-      this.list(guildId),
-      this.listBindings(guildId),
-    ]);
+    const [classes, bindings] = await Promise.all([this.list(guildId), this.listBindings(guildId)]);
 
     const wanted = new Set(permissions);
     const classGrants = new Set<string>();

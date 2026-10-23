@@ -54,3 +54,36 @@ export function formatBytes(bytes: number): string {
   const megabytes = bytes / 1_024 / 1_024;
   return megabytes >= 1_024 ? `${(megabytes / 1_024).toFixed(2)} GB` : `${megabytes.toFixed(1)} MB`;
 }
+
+/** A validated rename: either a value to store (`null` clears) or a message to show. */
+export type RenameInput = { readonly name: string | null } | { readonly error: string };
+
+/**
+ * Validates a display-name input shared by `/roles` and `/staff`.
+ *
+ * Returns a value rather than throwing so a caller can reply with `errorEmbed` without
+ * unwinding an interaction. `name` and `reset` are two spellings of one decision, so
+ * "neither" and "both" are rejected instead of guessed at: silently preferring one
+ * would make the other a no-op the operator cannot see.
+ */
+export function readRename(name: string | null, reset: boolean): RenameInput {
+  const trimmed = name?.trim() ?? "";
+
+  if (reset && trimmed.length > 0) {
+    return { error: "Choose one: a name to set, or `reset` to restore the default." };
+  }
+  if (reset || trimmed.toLowerCase() === "reset") {
+    return { name: null };
+  }
+  if (trimmed.length === 0) {
+    return { error: "Give a name to set, or `reset` to restore the default." };
+  }
+  // A newline would break out of the single embed line that renders the name.
+  if (/\n/.test(trimmed)) {
+    return { error: "The name must be a single line." };
+  }
+  if (trimmed.startsWith("@")) {
+    return { error: "Leave the `@` out — the name is a label, not a mention." };
+  }
+  return { name: trimmed };
+}
