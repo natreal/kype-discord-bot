@@ -763,3 +763,114 @@ describe("/github permission surface", () => {
     expect(JSON.stringify(replies)).toContain("refreshed");
   });
 });
+
+/**
+ * `/github history` prints at most 25 snapshots. The monitor records one an hour, so 25
+ * is a day of history plus one; the cap exists because an embed that grows with the
+ * archive eventually becomes a message Discord refuses. Both layers are asserted: the
+ * range Discord offers the caller, and the window the handler is willing to read.
+ */
+describe("/github history window", () => {
+  /** A stored snapshot, minimal but shaped like the record the monitor writes. */
+  function snapshot(index: number): SnapshotRecord {
+    return {
+      id: `snapshot-${index}`,
+      capturedAt: new Date(NOW.getTime() - index * 3_600_000),
+      state: {
+        stars: 1_000,
+        forks: 100,
+        openIssues: 10,
+        libraryPercent: 57,
+        librariesDone: 6_000,
+        librariesTotal: 11_697,
+        shaderPercent: 63,
+        shadersDone: 300,
+        shadersTotal: 476,
+      },
+      progressCommit: null,
+      commitCount: 0,
+      pullCount: 0,
+      failures: [],
+    };
+  }
+
+  /** The description of the first embed in a recorded `editReply` payload. */
+  function descriptionOf(payload: unknown): string {
+    const embed = (payload as { embeds?: { data?: { description?: string } }[] }).embeds?.[0];
+    return embed?.data?.description ?? "";
+  }
+
+  /** An interaction running `/github history` with `limit` already parsed. */
+  function interactionFor(limit: number | null): {
+    interaction: ChatInputCommandInteraction;
+    replies: unknown[];
+  } {
+    const replies: unknown[] = [];
+    const stub = {
+      options: {
+        getSubcommand: () => "history",
+        getInteger: () => limit,
+      },
+      member: null,
+      replied: false,
+      deferred: false,
+      deferReply: () => {
+        stub.deferred = true;
+        return Promise.resolve();
+      },
+      editReply: (payload: unknown) => {
+        replies.push(payload);
+        return Promise.resolve();
+      },
+    };
+    return { interaction: stub as unknown as ChatInputCommandInteraction, replies };
+  }
+
+  /** A context whose monitor always returns `count` snapshots, oldest first. */
+  function contextWith(count: number): {
+    context: CommandExecutionContext;
+    history: ReturnType<typeof vi.fn>;
+  } {
+    const history = vi.fn(() =>
+      Promise.resolve(Array.from({ length: count }, (_, index) => snapshot(index))),
+    );
+    const context = {
+      repositoryMonitor: { fullName: "boykopovar/AnyPS5", history },
+    } as unknown as CommandExecutionContext;
+    return { context, history };
+  }
+
+  it("offers 25 as the highest limit Discord will accept", () => {
+    const json = githubCommand.data.toJSON() as unknown as {
+      options?: {
+        name: string;
+        options?: { name: string; description?: string; max_value?: number }[];
+      }[];
+    };
+    const subcommand = json.options?.find((option) => option.name === "history");
+    const limit = subcommand?.options?.find((option) => option.name === "limit");
+
+    expect(limit?.max_value).toBe(25);
+    expect(limit?.description).toContain("1-25");
+  });
+
+  it("prints 12 rows by default and never reads more than 25 snapshots", async () => {
+    const { context, history } = contextWith(40);
+    const { interaction, replies } = interactionFor(null);
+
+    await githubCommand.execute(interaction, context);
+
+    expect(history).toHaveBeenCalledWith(25);
+    expect(descriptionOf(replies.at(-1)).split("\n")).toHaveLength(12);
+  });
+
+  it("prints at most 25 rows when a caller asks for more", async () => {
+    const { context, history } = contextWith(40);
+    const { interaction, replies } = interactionFor(500);
+
+    await githubCommand.execute(interaction, context);
+
+    expect(history).toHaveBeenCalledWith(25);
+    expect(descriptionOf(replies.at(-1)).split("\n")).toHaveLength(25);
+  });
+});

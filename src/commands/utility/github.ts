@@ -2,7 +2,7 @@
  * `/github` — the watched repository's implementation statistics.
  *
  *   /github status  — the latest snapshot, with the trend since the first one kept
- *   /github history — the recorded snapshots, oldest first (24 by default)
+ *   /github history — the recorded snapshots, oldest first (12 by default, 25 at most)
  *   /github refresh — take a snapshot now instead of waiting for the hourly task
  *
  * Every number shown comes from the project's own published `progress.json`, stored
@@ -25,8 +25,13 @@ import { buildReportContent } from "../../modules/repository/repository-report.c
 import type { RepositoryMonitorService } from "../../modules/repository/repository.service.js";
 import type { SnapshotRecord } from "../../modules/repository/repository.types.js";
 
-/** Rows `/github history` prints at most: a day at the default cadence. */
-const HISTORY_ROWS = 24;
+/**
+ * Rows `/github history` prints at most, and the window `/github status` trends
+ * against. The monitor records one snapshot an hour, so 25 is "a day of history plus
+ * one" rather than the whole archive — an embed that grows without bound is a message
+ * Discord eventually refuses.
+ */
+const HISTORY_LIMIT_MAX = 25;
 
 export default defineSlashCommand({
   meta: {
@@ -55,9 +60,9 @@ export default defineSlashCommand({
         .addIntegerOption((option) =>
           option
             .setName("limit")
-            .setDescription(`How many snapshots to list (1-${HISTORY_ROWS}, default 12).`)
+            .setDescription(`How many snapshots to list (1-${HISTORY_LIMIT_MAX}, default 12).`)
             .setMinValue(1)
-            .setMaxValue(HISTORY_ROWS),
+            .setMaxValue(HISTORY_LIMIT_MAX),
         ),
     )
     .addSubcommand((sub) =>
@@ -103,7 +108,7 @@ async function handleStatus(
   interaction: ChatInputCommandInteraction,
   monitor: RepositoryMonitorService,
 ): Promise<void> {
-  const history = await monitor.history(HISTORY_ROWS);
+  const history = await monitor.history(HISTORY_LIMIT_MAX);
   const latest = history.at(-1) ?? null;
   if (latest === null) {
     await interaction.editReply({
@@ -158,8 +163,12 @@ async function handleHistory(
   interaction: ChatInputCommandInteraction,
   monitor: RepositoryMonitorService,
 ): Promise<void> {
-  const limit = interaction.options.getInteger("limit") ?? 12;
-  const history = (await monitor.history(HISTORY_ROWS)).slice(-limit);
+  // Discord enforces the option's 1-25 range, but the value is still user input:
+  // clamping here keeps "at most 25 rows" true for a stale client or a replayed
+  // payload, and the fetch below is capped for the same reason.
+  const requested = interaction.options.getInteger("limit") ?? 12;
+  const limit = Math.min(requested, HISTORY_LIMIT_MAX);
+  const history = (await monitor.history(HISTORY_LIMIT_MAX)).slice(-limit);
   if (history.length === 0) {
     await interaction.editReply({
       embeds: [
