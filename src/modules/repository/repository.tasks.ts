@@ -30,17 +30,28 @@ export interface RepositoryRefreshHandlerOptions {
   readonly intervalMinutes: number;
   /** Logged once when the task is first scheduled. */
   readonly intervalSource?: string | undefined;
+  /**
+   * The guild the process-wide job is filed under.
+   *
+   * Injected rather than read from `process.env`: `scheduled_tasks.guildId` is a
+   * foreign key, so the value must be a guild the bot is actually in, and only the
+   * caller knows that. Returns `null` when the bot is in no guild, in which case
+   * nothing is scheduled.
+   */
+  readonly resolveGuildId: () => string | null;
 }
 
 /** Builds the handler and the "make sure it is scheduled" function. */
 export class RepositoryRefresher {
   private readonly scheduler: SchedulerService;
   private readonly monitor: RepositoryMonitorService;
+  private readonly resolveGuildId: () => string | null;
   private readonly intervalSeconds: number;
 
   public constructor(options: RepositoryRefreshHandlerOptions) {
     this.scheduler = options.scheduler;
     this.monitor = options.monitor;
+    this.resolveGuildId = options.resolveGuildId;
     this.intervalSeconds =
       Math.max(Math.trunc(options.intervalMinutes), MIN_REFRESH_INTERVAL_MINUTES) * 60;
   }
@@ -63,26 +74,33 @@ export class RepositoryRefresher {
    * @param delaySeconds how long to wait before the first run. Startup passes a
    * small value so the first snapshot is taken soon after boot rather than an hour
    * later; the recorded history then has no hour-long hole after every restart.
+   * @returns false when the bot is in no guild, so nothing could be filed.
    */
-  public async ensureScheduled(delaySeconds?: number): Promise<void> {
+  public async ensureScheduled(delaySeconds?: number): Promise<boolean> {
+    const guildId = this.resolveGuildId();
+    if (guildId === null) {
+      return false;
+    }
     const record = await this.monitor.ensureWatched();
     await this.scheduler.schedule({
-      guildId: repositoryGuildId(),
+      guildId,
       kind: REPOSITORY_REFRESH_TASK_KIND,
       delaySeconds: delaySeconds ?? this.intervalSeconds,
       recurrence: { everySeconds: this.intervalSeconds },
       dedupeKey: `${REPOSITORY_REFRESH_TASK_KIND}:${record.id}`,
       payload: { repositoryId: record.id },
     });
+    return true;
   }
 
   /** Cancels the scheduled refresh, for an operator turning the feature off. */
   public async cancel(): Promise<boolean> {
+    const guildId = this.resolveGuildId();
+    if (guildId === null) {
+      return false;
+    }
     const record = await this.monitor.ensureWatched();
-    return this.scheduler.cancelByKey(
-      repositoryGuildId(),
-      `${REPOSITORY_REFRESH_TASK_KIND}:${record.id}`,
-    );
+    return this.scheduler.cancelByKey(guildId, `${REPOSITORY_REFRESH_TASK_KIND}:${record.id}`);
   }
 
   private async run(context: TaskHandlerContext): Promise<TaskHandlerResult> {
@@ -109,12 +127,13 @@ export class RepositoryRefresher {
  * migration plus a looser claim query.
  *
  * The consequence, accepted deliberately: the hourly job needs at least one guild
- * to exist. `startup` therefore only schedules it when the bot is in a server, and
- * `/github` says so plainly instead of pretending the monitor is running.
+ * to exist. `startRepositoryMonitor` therefore only schedules it when the bot is in
+ * a server, and `/github` says so plainly instead of pretending the monitor is
+ * running.
  *
  * A monitor is a deployment concern rather than a per-server setting, so a single
  * row is the right cardinality however many servers the bot serves.
+ *
+ * The IDs come from the caller through {@link RepositoryRefreshHandlerOptions.resolveGuildId}:
+ * reading them from the environment produced `"0"`, which the foreign key rejects.
  */
-export function repositoryGuildId(): string {
-  return process.env["REPOSITORY_JOB_GUILD_ID"] ?? "0";
-}

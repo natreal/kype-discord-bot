@@ -26,7 +26,6 @@ export {
   REPOSITORY_REFRESH_TASK_KIND,
   DEFAULT_REFRESH_INTERVAL_MINUTES,
   MIN_REFRESH_INTERVAL_MINUTES,
-  repositoryGuildId,
 } from "./repository.tasks.js";
 export { deriveEvents, formatCount, truncate } from "./repository.events.js";
 export { buildReportContent, type ReportContent } from "./repository-report.content.js";

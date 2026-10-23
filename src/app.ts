@@ -861,6 +861,11 @@ export async function createApplication(): Promise<Application> {
     scheduler,
     monitor: repositoryMonitor,
     intervalMinutes: config.repository.intervalMinutes,
+    // `scheduled_tasks.guildId` is a foreign key, so the job is filed under a guild
+    // the bot is actually in. The lowest guild ID is chosen, not "whichever is
+    // first in the cache": cache order follows `GUILD_CREATE`, which is not stable
+    // between restarts, and a different guild each boot would file a second row.
+    resolveGuildId: () => [...client.guilds.cache.keys()].sort()[0] ?? null,
   });
   taskRegistry.register(repositoryRefresher.handler());
 
@@ -868,7 +873,7 @@ export async function createApplication(): Promise<Application> {
    * Schedules the refresh for a process-wide job.
    *
    * `scheduled_tasks.guildId` is a foreign key and the job belongs to no server, so
-   * it is filed under the first guild the bot can see (see `repositoryGuildId`).
+   * it is filed under the lowest guild the bot can see (see `resolveGuildId`).
    * With no guild there is no valid row: the monitor then keeps recording nothing
    * rather than registering a task the scheduler would reject.
    *
@@ -882,7 +887,12 @@ export async function createApplication(): Promise<Application> {
       });
       return;
     }
-    await repositoryRefresher.ensureScheduled(60);
+    if (!(await repositoryRefresher.ensureScheduled(60))) {
+      logger.warn("The repository monitor was not scheduled: no guild to file the job under", {
+        repository: config.repository.fullName,
+      });
+      return;
+    }
     logger.info("Repository monitor scheduled", {
       repository: config.repository.fullName,
       intervalMinutes: config.repository.intervalMinutes,
