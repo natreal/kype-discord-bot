@@ -149,8 +149,16 @@ export const envSchema = z.object({
     .default(0)
     .describe("Hard daily token budget across all requests (0 = unlimited)."),
 
-  /** Per-request timeout, in milliseconds. */
-  AI_REQUEST_TIMEOUT_MS: z.coerce.number().int().min(1).default(20_000).describe(
+  /**
+   * Per-request timeout, in milliseconds.
+   *
+   * 60s, not 20s. `/ai ask` runs reasoning models (Gemini 2.5 and its peers emit
+   * thinking tokens before the first visible token), and a 20s budget aborted
+   * healthy requests mid-thought — showing up as `HTTP 408` on a setup that was
+   * working. A shorter value is fine for a fast classification model, but the
+   * default must not be the reason a correct prompt fails.
+   */
+  AI_REQUEST_TIMEOUT_MS: z.coerce.number().int().min(1).default(60_000).describe(
     "Per-request timeout in milliseconds.",
   ),
 

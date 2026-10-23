@@ -143,7 +143,10 @@ describe("environment validation", () => {
     expect(config.ai.apiKey).toBeUndefined();
     expect(config.ai.defaultTrigger).toBe("kype");
     expect(config.ai.dailyTokenBudget).toBe(0);
-    expect(config.ai.requestTimeoutMs).toBe(20_000);
+    // 60s, not 20s: reasoning models emit thinking tokens before the first visible
+    // one, and a 20s budget aborted healthy Gemini requests mid-thought (HTTP 408).
+    expect(config.ai.requestTimeoutMs).toBe(60_000);
+
   });
 
   it("reads AI environment variables and masks the API key in the redacted config", () => {

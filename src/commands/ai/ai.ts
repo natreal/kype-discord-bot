@@ -137,6 +137,7 @@ export default defineSlashCommand({
                   { name: "defaultTrigger", value: "defaultTrigger" },
                   { name: "persona", value: "persona" },
                   { name: "dailyTokenBudget", value: "dailyTokenBudget" },
+                  { name: "requestTimeoutMs", value: "requestTimeoutMs" },
                 ),
             )
             .addStringOption((option) =>
@@ -144,6 +145,14 @@ export default defineSlashCommand({
             )
             .addIntegerOption((option) =>
               option.setName("budget").setDescription("Daily token budget (0 = unlimited).").setRequired(false),
+            )
+            .addIntegerOption((option) =>
+              option
+                .setName("timeout")
+                .setDescription("Per-request timeout in ms (e.g. 60000).")
+                .setRequired(false)
+                .setMinValue(1_000)
+                .setMaxValue(600_000),
             ),
         )
         .addSubcommand((sub) =>
@@ -459,12 +468,26 @@ async function handleConfig(
   const key = interaction.options.getString("key", true);
   const value = interaction.options.getString("value");
   const budget = interaction.options.getInteger("budget");
+  const timeout = interaction.options.getInteger("timeout");
 
   const patch: AiProviderSettingsPatch = {};
   if (key === "apiKey") {
     patch.apiKey = value ?? null;
   } else if (key === "dailyTokenBudget") {
     patch.dailyTokenBudget = budget ?? 0;
+  } else if (key === "requestTimeoutMs") {
+    if (timeout === null) {
+      await interaction.editReply({
+        embeds: [
+          errorEmbed(
+            "IA",
+            "Fournis `timeout` (en millisecondes) pour `requestTimeoutMs`, par exemple `60000`.",
+          ),
+        ],
+      });
+      return;
+    }
+    patch.requestTimeoutMs = timeout;
   } else if (value !== undefined) {
     if (key === "baseUrl") patch.baseUrl = value;
     else if (key === "modelFast") patch.modelFast = value;
@@ -488,10 +511,17 @@ async function handleConfig(
     ...(effective.modelFast === undefined ? {} : { modelFast: effective.modelFast }),
     ...(effective.modelSmart === undefined ? {} : { modelSmart: effective.modelSmart }),
     dailyTokenBudget: effective.dailyTokenBudget,
+    timeoutMs: effective.requestTimeoutMs,
   });
 
   // Never echo a typed API key back.
-  const echoed = key === "apiKey" ? "`[redacted]`" : `\`${value ?? budget ?? ""}\``;
+  const echoed =
+    key === "apiKey"
+      ? "`[redacted]`"
+      : key === "requestTimeoutMs"
+        ? `\`${timeout ?? ""}\` ms`
+        : `\`${value ?? budget ?? ""}\``;
+
   await interaction.editReply({
     embeds: [brandedEmbed("IA mise à jour").setDescription(`**${key}** = ${echoed}`)],
   });

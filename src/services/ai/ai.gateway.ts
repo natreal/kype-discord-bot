@@ -175,6 +175,7 @@ export class AiGateway {
     readonly modelFast?: string;
     readonly modelSmart?: string;
     readonly dailyTokenBudget?: number;
+    readonly timeoutMs?: number;
   }): void {
     if (options.modelFast !== undefined || options.modelSmart !== undefined || options.dailyTokenBudget !== undefined) {
       const next: { fast?: string; smart?: string } = {
@@ -195,6 +196,7 @@ export class AiGateway {
     this.provider.reconfigure?.({
       ...(options.baseUrl === undefined ? {} : { baseUrl: options.baseUrl }),
       ...(options.apiKey === undefined ? {} : { apiKey: options.apiKey }),
+      ...(options.timeoutMs === undefined ? {} : { timeoutMs: options.timeoutMs }),
     });
     this.logger.warn("AI gateway reconfigured", {
       modelFast: this.models.fast ?? null,

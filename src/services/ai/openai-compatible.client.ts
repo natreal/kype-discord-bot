@@ -139,7 +139,10 @@ const COMPLETION_SCHEMA = z.object({
 export class OpenAiCompatibleClient {
   private baseUrl: string;
   private apiKey: string | undefined;
-  private readonly timeoutMs: number;
+  // Mutable, so `reconfigure` can retune it: the timeout is the first thing an
+  // operator has to change when a reasoning model runs long, and making it
+  // restart-only meant that fix was unreachable from Discord.
+  private timeoutMs: number;
   private readonly fetch: typeof fetch;
 
   public constructor(options: AiClientOptions) {
@@ -163,7 +166,11 @@ export class OpenAiCompatibleClient {
    * a different provider (or rotate the API key) from Discord without a restart.
    * The base URL is normalized the same way the constructor does.
    */
-  public reconfigure(options: { readonly baseUrl?: string; readonly apiKey?: string }): void {
+  public reconfigure(options: {
+    readonly baseUrl?: string;
+    readonly apiKey?: string;
+    readonly timeoutMs?: number;
+  }): void {
     // An empty string is "nothing was configured", not an instruction to disconnect:
     // honouring it would turn a settings read that found no row into a live client
     // with `"" + "/chat/completions"` as its URL, which fails as a relative fetch.
@@ -172,6 +179,11 @@ export class OpenAiCompatibleClient {
     }
     if (options.apiKey !== undefined && options.apiKey.length > 0) {
       this.apiKey = options.apiKey;
+    }
+    // Guard against 0/negative/NaN: a bad stored value must not turn every request
+    // into an instant abort, which would look exactly like the 408 we are fixing.
+    if (options.timeoutMs !== undefined && Number.isFinite(options.timeoutMs) && options.timeoutMs > 0) {
+      this.timeoutMs = Math.floor(options.timeoutMs);
     }
   }
 
@@ -183,7 +195,12 @@ export class OpenAiCompatibleClient {
       return {
         ok: false,
         reason: "http",
-        retryable: http.status === 429 || http.status >= 500,
+        // 408 is this client's own abort (the request outlived `timeoutMs`), and a
+        // reasoning model that exceeded one budget may well answer inside the next.
+        // Omitting it made a timeout the one transient failure the gateway never
+        // retried, so a slow provider failed immediately instead of being given a
+        // second, shorter attempt.
+        retryable: http.status === 408 || http.status === 429 || http.status >= 500,
         detail: describeFailure(http.status, http.statusText, http.body),
       };
     }
@@ -379,11 +396,36 @@ export class OpenAiCompatibleClient {
       return { ok: true, status: response.status, statusText, body: parsed };
     } catch (error) {
       const aborted = error instanceof Error && error.name === "AbortError";
+      if (aborted) {
+        // Name the budget and the likely cause. "HTTP 408" alone sends an operator
+        // hunting for a dead endpoint when the real fix is a longer timeout (or a
+        // non-reasoning model): Gemini 2.5 emits thinking tokens first, so a
+        // trivial-looking prompt can still outrun a 20s budget.
+        return {
+          ok: false,
+          status: 408,
+          statusText: "Request Timeout",
+          body: {
+            error: {
+              message: `no response within ${this.timeoutMs}ms (AI_REQUEST_TIMEOUT_MS)`,
+            },
+          },
+        };
+      }
+      // A real network fault: surface the cause instead of an empty string. ECONNRESET
+      // and ENOTFOUND look identical in a bare "HTTP 0" and need opposite fixes.
       return {
         ok: false,
-        status: aborted ? 408 : 0,
-        statusText: aborted ? "Request Timeout" : "",
-        body: undefined,
+        status: 0,
+        statusText: "",
+        body: {
+          error: {
+            message:
+              error instanceof Error
+                ? (error.cause instanceof Error ? error.cause.message : error.message)
+                : String(error),
+          },
+        },
       };
     } finally {
       clearTimeout(timeout);

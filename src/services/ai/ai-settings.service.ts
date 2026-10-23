@@ -166,7 +166,15 @@ export class AiSettingsService {
    * fields; `.env` keeps filling anything unset).
    */
   public async update(patch: AiProviderSettingsPatch): Promise<void> {
-    await this.repository.set(AI_PROVIDER_SETTINGS_KEY, patch);
+    // Fill an omitted timeout from the `.env` default rather than letting the row's
+    // column default (20s) pin the budget. Otherwise an operator who configures any
+    // *other* setting first — the common order: URL, then key — creates a row at
+    // 20s, and every later request times out no matter what `AI_REQUEST_TIMEOUT_MS`
+    // says, because the stored value always wins in `get()`.
+    await this.repository.set(AI_PROVIDER_SETTINGS_KEY, {
+      ...patch,
+      requestTimeoutMs: patch.requestTimeoutMs ?? this.env.requestTimeoutMs,
+    });
     this.logger.warn("AI provider settings updated", {
       baseUrl: patch.baseUrl === undefined ? "(unchanged)" : patch.baseUrl,
       apiKeySet: patch.apiKey !== undefined && patch.apiKey !== null && patch.apiKey.length > 0,
@@ -215,6 +223,9 @@ export class PrismaAiProviderSettingsRepository implements AiProviderSettingsRep
           modelFast: patch.modelFast ?? null,
           modelSmart: patch.modelSmart ?? null,
           dailyTokenBudget: patch.dailyTokenBudget ?? 0,
+          // The repository is a pure DB adapter and knows nothing about `.env`, so a
+          // patch without a timeout lands on the column default. `update()` fills it
+          // in; this keeps the SQL truthful for any other caller.
           requestTimeoutMs: patch.requestTimeoutMs ?? 20_000,
           defaultTrigger: patch.defaultTrigger ?? null,
           persona: patch.persona ?? null,

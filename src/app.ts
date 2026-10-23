@@ -718,6 +718,7 @@ export async function createApplication(): Promise<Application> {
     ...(persistedAi.modelFast === undefined ? {} : { modelFast: persistedAi.modelFast }),
     ...(persistedAi.modelSmart === undefined ? {} : { modelSmart: persistedAi.modelSmart }),
     dailyTokenBudget: persistedAi.dailyTokenBudget,
+    timeoutMs: persistedAi.requestTimeoutMs,
   });
 
   const aiRegistry = new AiToolRegistry(logger);

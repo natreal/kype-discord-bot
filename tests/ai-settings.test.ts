@@ -83,4 +83,30 @@ describe("AiSettingsService", () => {
     const redacted = await service.getRedacted();
     expect(redacted.persona).toBe("Talk like a laid-back friend.");
   });
+
+  it("stores the .env timeout when a patch does not name one", async () => {
+    // The regression: configuring *any* other setting created a row at the column
+    // default (20s). Since a stored value beats `.env` in `get()`, raising
+    // `AI_REQUEST_TIMEOUT_MS` then had no effect and every request timed out.
+    const repo = memRepo();
+    const service = new AiSettingsService({
+      logger: testLogger,
+      repository: repo,
+      env: { ...env, requestTimeoutMs: 60_000 },
+    });
+
+    await service.update({ baseUrl: "https://example.test/v1" });
+
+    expect((await service.get()).requestTimeoutMs).toBe(60_000);
+  });
+
+  it("honours an explicit timeout, so the owner can retune it from Discord", async () => {
+    const repo = memRepo();
+    const service = new AiSettingsService({ logger: testLogger, repository: repo, env });
+
+    await service.update({ requestTimeoutMs: 120_000 });
+
+    expect((await service.get()).requestTimeoutMs).toBe(120_000);
+    expect((await service.get()).baseUrl).toBe("http://localhost:11434/v1");
+  });
 });
