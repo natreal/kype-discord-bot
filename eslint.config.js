@@ -86,6 +86,21 @@ export default tseslint.config(
     },
   },
 
+  // Build-time helper scripts run under plain Node (no bundler, no tsconfig), so
+  // they need Node's globals declared the way the TypeScript configs get theirs.
+  {
+    files: ["scripts/**/*.mjs"],
+    languageOptions: {
+      globals: {
+        process: "readonly",
+        console: "readonly",
+      },
+    },
+    rules: {
+      "no-console": "off",
+    },
+  },
+
   // Prettier must come last so formatting-related rules stay disabled.
   prettier,
 );

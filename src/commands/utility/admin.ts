@@ -6,11 +6,14 @@
  * so an install can always be corrected without leaving Discord.
  */
 import { SlashCommandBuilder, type ChatInputCommandInteraction } from "discord.js";
+import { existsSync, readFileSync } from "node:fs";
+import path from "node:path";
 
 import { defineSlashCommand } from "../define.js";
 import { buildInviteLink, profilePermissionValue } from "../../utils/invite.js";
 import { brandedEmbed, errorEmbed } from "../../utils/presenters.js";
 import { INSTALL_PROFILES } from "../../services/permissions/index.js";
+import { isDeployRequested, requestDeploy } from "../../runtime/deploy-request.js";
 import type { CommandExecutionContext } from "../context.js";
 
 export default defineSlashCommand({
@@ -48,6 +51,19 @@ export default defineSlashCommand({
             .setName("force")
             .setDescription("Register even if the stored deployment record says it is current."),
         ),
+    )
+    .addSubcommand((subcommand) =>
+      subcommand
+        .setName("update")
+        .setDescription("Ask the host to deploy the latest code from GitHub within ~1 minute.")
+        .addStringOption((option) =>
+          option.setName("reason").setDescription("Why, for the deploy log (optional)."),
+        ),
+    )
+    .addSubcommand((subcommand) =>
+      subcommand
+        .setName("update-status")
+        .setDescription("Show what the last deploy did and whether the running build matches."),
     ),
   execute: async (interaction, context) => {
     const guild = interaction.guild;
@@ -79,6 +95,16 @@ export default defineSlashCommand({
 
     if (interaction.options.getSubcommand() === "deploy") {
       await handleDeploy(interaction, context);
+      return;
+    }
+
+    if (interaction.options.getSubcommand() === "update") {
+      await handleUpdate(interaction, context);
+      return;
+    }
+
+    if (interaction.options.getSubcommand() === "update-status") {
+      await handleUpdateStatus(interaction, context);
       return;
     }
 
@@ -223,4 +249,167 @@ async function handleDeploy(
     });
 
   await interaction.editReply({ embeds: [embed] });
+}
+
+/**
+ * `/admin update` — asks the host to deploy the latest commit from the phone.
+ *
+ * The bot cannot deploy itself. `deploy.ps1` stops the bot as its first mutating
+ * step, and running `git merge` + `npm ci` from a chat command is remote code
+ * execution with extra steps. So this writes `.run/deploy.request` and returns: the
+ * scheduled `deploy.ps1` task — already ticking every minute and already owning the
+ * deploy lock, the rollback and the health check — sees the request and does the
+ * work. Nothing here fetches, builds or restarts.
+ *
+ * The request is deliberately *not* executed inline: fetching under the bot's own
+ * lock would race the scheduled run, and a deploy that interrupts itself mid-`npm
+ * ci` is how a host ends up with a half-installed `node_modules`.
+ */
+async function handleUpdate(
+  interaction: ChatInputCommandInteraction,
+  context: CommandExecutionContext,
+): Promise<void> {
+  const guild = interaction.guild;
+  if (!guild) {
+    await interaction.reply({
+      content: "This command must be run inside a server.",
+      ephemeral: true,
+    });
+    return;
+  }
+
+  const reason = interaction.options.getString("reason") ?? undefined;
+  const actor = `${interaction.user.username} (${interaction.user.id})`;
+
+  let markerPath: string;
+  try {
+    markerPath = requestDeploy({
+      requestedBy: actor,
+      ...(reason === undefined ? {} : { reason }),
+    });
+  } catch (error) {
+    await interaction.reply({
+      embeds: [
+        errorEmbed(
+          "Update request not written",
+          [
+            `The host could not be asked to deploy: ${error instanceof Error ? error.message : String(error)}.`,
+            "",
+            "This needs the bot to run from the project directory, with `.run` writable.",
+          ].join("\n"),
+        ),
+      ],
+      ephemeral: true,
+    });
+    return;
+  }
+
+  const build = context.appConfig.build;
+  await interaction.reply({
+    embeds: [
+      brandedEmbed("Update requested")
+        .setDescription(
+          [
+            "The deploy task checks GitHub every minute. Your request jumps the queue: on its next tick it will stop the bot, deploy the newest commit, rebuild, run the tests and start the bot again.",
+            "",
+            "**You will be disconnected for 1–3 minutes.** If the deploy fails, the previous commit is restored automatically and the bot comes back on the old code.",
+          ].join("\n"),
+        )
+        .addFields(
+          { name: "Requested by", value: actor, inline: true },
+          {
+            name: "Currently running",
+            value: build ? `${build.commit.slice(0, 7)}${build.dirty ? " (dirty)" : ""}` : "unbuilt",
+            inline: true,
+          },
+          { name: "Marker", value: `\`${path.basename(markerPath)}\``, inline: true },
+        )
+        .setFooter({ text: "Check the result with `/admin update-status`." }),
+    ],
+    ephemeral: true,
+  });
+}
+
+/** What `deploy.ps1` writes to `.run/deploy-state.json`. */
+interface DeployStateRecord {
+  readonly checkedAt?: string;
+  readonly result?: string;
+  readonly message?: string;
+  readonly branch?: string;
+  readonly deployedSha?: string;
+  readonly targetSha?: string;
+}
+
+/** Reads the deploy state, or `null` when the file is absent/corrupt. */
+function readDeployState(): DeployStateRecord | null {
+  try {
+    const file = path.join(process.cwd(), ".run", "deploy-state.json");
+    if (!existsSync(file)) {
+      return null;
+    }
+    return JSON.parse(readFileSync(file, "utf8")) as DeployStateRecord;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * `/admin update-status` — did the update land?
+ *
+ * Reports the deploy record *and* the running build side by side, because those are
+ * the two facts that can disagree: a deploy can succeed while the bot is still the
+ * old process (it comes back on restart), and a bot can restart while the deploy is
+ * still running. Only the comparison answers "am I on the new code?".
+ */
+async function handleUpdateStatus(
+  interaction: ChatInputCommandInteraction,
+  context: CommandExecutionContext,
+): Promise<void> {
+  const state = readDeployState();
+  const build = context.appConfig.build;
+  const pending = isDeployRequested();
+
+  const lines: string[] = [];
+  if (!state) {
+    lines.push("No deployment has run on this host yet (`.run/deploy-state.json` is absent).");
+  } else {
+    lines.push(`**Last result:** \`${state.result ?? "unknown"}\``);
+    if (state.message) {
+      lines.push(`**Detail:** ${state.message}`);
+    }
+    if (state.checkedAt) {
+      lines.push(`**Checked:** ${state.checkedAt}`);
+    }
+  }
+
+  const deployed = state?.deployedSha;
+  const running = build?.commit;
+  const matches = Boolean(deployed && running && deployed === running);
+
+  const embed = brandedEmbed("Update status")
+    .setDescription(lines.join("\n"))
+    .addFields(
+      {
+        name: "Running build",
+        value: build ? `${build.commit.slice(0, 7)}${build.dirty ? " (dirty)" : ""}` : "unbuilt",
+        inline: true,
+      },
+      {
+        name: "Deployed commit",
+        value: deployed ? deployed.slice(0, 7) : "unknown",
+        inline: true,
+      },
+      {
+        name: "Match",
+        value: matches ? "yes" : "no",
+        inline: true,
+      },
+    )
+    .setFooter({
+      text: pending
+        ? "An update request is queued; the next deploy tick will pick it up."
+        : "Use `/admin update` to request the newest commit.",
+    });
+
+  await interaction.reply({ embeds: [embed], ephemeral: true });
 }

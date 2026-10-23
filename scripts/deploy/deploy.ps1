@@ -47,6 +47,7 @@ $BotLog      = Join-Path $LogDir "bot.log"
 $StateFile   = Join-Path $RunDir "deploy-state.json"
 $FailureFile = Join-Path $RunDir "deploy-failed-target.json"
 $LockFile    = Join-Path $RunDir "deploy.lock"
+$RequestFile = Join-Path $RunDir "deploy.request"
 $BuildMarker = Join-Path $RunDir ".built"
 $Botctl      = Join-Path $ProjectDir "scripts\windows\botctl.ps1"
 $EnvFile     = Join-Path $ProjectDir ".env"
@@ -155,6 +156,29 @@ function Set-FailedTarget {
 
 function Clear-FailedTarget {
   Remove-Item $FailureFile -Force -ErrorAction SilentlyContinue
+}
+
+# --- on-demand requests ----------------------------------------------------
+# `/admin update` in Discord writes `.run/deploy.request`. The bot cannot deploy
+# itself -- stopping the bot is the first step of a deploy -- so it leaves a note
+# and this task picks it up on its next tick (every minute).
+#
+# A request is honoured once. It is consumed at the start of the run, whichever
+# way the run ends, so a request that could not be delivered (bad commit, failing
+# test) is not retried forever behind the operator's back. And it clears the
+# failed-target guard, because asking for an update *is* the decision to retry a
+# commit the previous attempt gave up on.
+function Read-DeployRequest {
+  if (-not (Test-Path $RequestFile)) { return $null }
+  try {
+    return Get-Content -Raw $RequestFile | ConvertFrom-Json
+  } catch {
+    return $null
+  }
+}
+
+function Clear-DeployRequest {
+  Remove-Item $RequestFile -Force -ErrorAction SilentlyContinue
 }
 
 # --- single instance -------------------------------------------------------
@@ -549,6 +573,11 @@ if ($Status) {
     Write-Host ("reason:      " + $failed.reason)
     Write-Host "Automatic retries of this commit are suspended; push a new commit or run deploy.ps1 -Force."
   }
+  $requested = Read-DeployRequest
+  if ($requested) {
+    $by = if ($requested.requestedBy) { $requested.requestedBy } else { "unknown" }
+    Write-Host ("update:      requested by " + $by + " at " + $requested.requestedAt)
+  }
   exit 0
 }
 
@@ -562,6 +591,18 @@ if (-not (Enter-DeployLock)) {
 $previousSha = ""
 $targetSha = ""
 $watchdogPaused = $false
+
+# Read and consume the on-demand request here: inside the lock, so two ticks cannot
+# both claim it, and before the up-to-date shortcut, so a request still forces a
+# fetch even when the last recorded state says nothing changed.
+$request = Read-DeployRequest
+if ($request) {
+  $requester = if ($request.requestedBy) { $request.requestedBy } else { "unknown" }
+  $why = if ($request.reason) { $request.reason } else { "no reason given" }
+  Write-DeployLog "On-demand update requested by $requester ($why)."
+  Clear-DeployRequest
+  Clear-FailedTarget
+}
 
 try {
   Write-DeployLog "Deployment check started (branch: $Branch)."

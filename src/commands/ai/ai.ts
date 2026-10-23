@@ -17,6 +17,7 @@ import {
 import { defineSlashCommand } from "../define.js";
 import type { CommandExecutionContext } from "../context.js";
 import { brandedEmbed, errorEmbed } from "../../utils/presenters.js";
+import { formatBuildInfo } from "../../runtime/build-info.js";
 import type { AiMode } from "../../modules/ai/tool-menu.js";
 import { hasGodAccess } from "../../services/authorization/index.js";
 import type { AiProviderSettingsPatch } from "../../services/ai/ai-settings.service.js";
@@ -326,6 +327,7 @@ async function handleStatus(interaction: ChatInputCommandInteraction, context: C
     `**Base URL :** ${context.appConfig.ai.baseUrl ? "présente" : "absente"}`,
     `**Modèles :** \`${context.appConfig.ai.modelFast ?? "-"}\` / \`${context.appConfig.ai.modelSmart ?? "-"}\``,
     `**Budget :** ${budget.used} / ${budget.limit === 0 ? "∞" : budget.limit} jetons`,
+    `**Version :** ${formatBuildInfo(context.appConfig.build)}`,
     ...(config?.ai
       ? [
           `**Activé (ce serveur) :** ${config.ai.enabled ? "oui" : "non"}`,

@@ -17,7 +17,7 @@
   ],
   "scripts": {
     "dev": "tsx watch --env-file-if-exists=.env src/index.ts",
-    "build": "npm run db:generate && tsc --build",
+    "build": "npm run db:generate && tsc --build && node scripts/write-build-info.mjs",
     "start": "node --env-file-if-exists=.env dist/index.js",
     "typecheck": "tsc --build --force",
     "lint": "eslint .",

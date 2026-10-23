@@ -144,7 +144,10 @@ export class OpenAiCompatibleClient {
 
   public constructor(options: AiClientOptions) {
     // Strip a trailing slash so `baseURL + "/chat/completions"` never doubles one.
-    this.baseUrl = options.baseUrl.replace(/\/+$/, "");
+    // Trim first: a value pasted into `/ai config set` often carries a trailing
+    // space, which survives JSON and turns the path into `/v1beta/openai /chat/...`
+    // — a 404 that looks exactly like a wrong URL.
+    this.baseUrl = normalizeBaseUrl(options.baseUrl);
     this.apiKey = options.apiKey;
     this.timeoutMs = options.timeoutMs;
     this.fetch = options.fetch ?? globalThis.fetch;
@@ -161,10 +164,13 @@ export class OpenAiCompatibleClient {
    * The base URL is normalized the same way the constructor does.
    */
   public reconfigure(options: { readonly baseUrl?: string; readonly apiKey?: string }): void {
-    if (options.baseUrl !== undefined) {
-      this.baseUrl = options.baseUrl.replace(/\/+$/, "");
+    // An empty string is "nothing was configured", not an instruction to disconnect:
+    // honouring it would turn a settings read that found no row into a live client
+    // with `"" + "/chat/completions"` as its URL, which fails as a relative fetch.
+    if (options.baseUrl !== undefined && options.baseUrl.length > 0) {
+      this.baseUrl = normalizeBaseUrl(options.baseUrl);
     }
-    if (options.apiKey !== undefined) {
+    if (options.apiKey !== undefined && options.apiKey.length > 0) {
       this.apiKey = options.apiKey;
     }
   }
@@ -178,7 +184,7 @@ export class OpenAiCompatibleClient {
         ok: false,
         reason: "http",
         retryable: http.status === 429 || http.status >= 500,
-        detail: `HTTP ${http.status}${http.statusText ? ` ${http.statusText}` : ""}`,
+        detail: describeFailure(http.status, http.statusText, http.body),
       };
     }
 
@@ -272,10 +278,33 @@ export class OpenAiCompatibleClient {
     return { ok: true, data: validated.data, usage: result.usage };
   }
 
-  /** Diagnostic ping against `/models`. Never throws. */
+  /**
+   * Diagnostic ping against `/models`. Never throws.
+   *
+   * `GET` first, because that is the documented verb for listing models and the
+   * one every OpenAI-compatible provider implements. A few permissive providers
+   * (OpenAI itself included) also accept `POST /models`, so a `404`/`405` on the
+   * `GET` is retried once as `POST` instead of being reported as a dead endpoint.
+   * Any other failure — a `401` for a bad key, a `403` for a restricted project —
+   * is reported as-is: those are the answers an operator needs to see.
+   *
+   * The returned `detail` carries the status *and* what Google/OpenAI said, which
+   * is the difference between "misconfigured" and "the model or path is wrong".
+   */
   public async ping(): Promise<{ ok: boolean; detail?: string }> {
-    const http = await this.post("/models", undefined);
-    return http.ok ? { ok: true } : { ok: false, detail: `HTTP ${http.status}` };
+    const first = await this.get("/models");
+    if (first.ok) {
+      return { ok: true };
+    }
+    // Only a verb/shape rejection is retried; an auth failure is final.
+    if (first.status === 404 || first.status === 405) {
+      const retry = await this.post("/models", undefined);
+      if (retry.ok) {
+        return { ok: true };
+      }
+      return { ok: false, detail: describeFailure(retry.status, retry.statusText, retry.body) };
+    }
+    return { ok: false, detail: describeFailure(first.status, first.statusText, first.body) };
   }
 
   /**
@@ -290,7 +319,35 @@ export class OpenAiCompatibleClient {
     body: unknown,
   ): Promise<
     | { ok: true; status: number; statusText: string; body: unknown }
-    | { ok: false; status: number; statusText: string }
+    | { ok: false; status: number; statusText: string; body: unknown }
+  > {
+    return this.send("POST", path, body);
+  }
+
+  /**
+   * One HTTP GET with the same timeout and error normalization as `post`.
+   *
+   * `GET` is not optional machinery: the OpenAI-compatible surface lists models
+   * with `GET /models`, and providers that implement only the documented verb —
+   * Google's compatibility layer is the one that bit us — answer a `POST /models`
+   * with a bare `404`, which reads like a broken deployment instead of a
+   * mislabelled diagnostic. `ping` therefore tries `GET` first.
+   */
+  private async get(path: string): Promise<
+    | { ok: true; status: number; statusText: string; body: unknown }
+    | { ok: false; status: number; statusText: string; body: unknown }
+  > {
+    return this.send("GET", path, undefined);
+  }
+
+  /** Shared transport for `post` and `get`: one timeout, one error shape. */
+  private async send(
+    method: "GET" | "POST",
+    path: string,
+    body: unknown,
+  ): Promise<
+    | { ok: true; status: number; statusText: string; body: unknown }
+    | { ok: false; status: number; statusText: string; body: unknown }
   > {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), this.timeoutMs);
@@ -298,7 +355,7 @@ export class OpenAiCompatibleClient {
 
     try {
       const response = await this.fetch(url, {
-        method: "POST",
+        method,
         headers: {
           "content-type": "application/json",
           ...(this.apiKey ? { authorization: `Bearer ${this.apiKey}` } : {}),
@@ -316,7 +373,7 @@ export class OpenAiCompatibleClient {
       }
 
       if (!response.ok) {
-        return { ok: false, status: response.status, statusText };
+        return { ok: false, status: response.status, statusText, body: parsed };
       }
 
       return { ok: true, status: response.status, statusText, body: parsed };
@@ -326,11 +383,66 @@ export class OpenAiCompatibleClient {
         ok: false,
         status: aborted ? 408 : 0,
         statusText: aborted ? "Request Timeout" : "",
+        body: undefined,
       };
     } finally {
       clearTimeout(timeout);
     }
   }
+}
+
+/**
+ * Normalizes a provider base URL: trims surrounding whitespace and drops trailing
+ * slashes, so `baseUrl + "/chat/completions"` is always well formed.
+ */
+function normalizeBaseUrl(raw: string): string {
+  return raw.trim().replace(/\/+$/, "");
+}
+
+/**
+ * Turns a failed HTTP exchange into one line an operator can act on.
+ *
+ * Providers disagree about where the reason lives (`error.message`,
+ * `error.detail`, a bare string), and the OpenAI shape nests it, so all three are
+ * probed. A status alone is not enough: `404` means "wrong URL" to one provider
+ * and "unknown model" to another, and only the message distinguishes them.
+ */
+function describeFailure(status: number, statusText: string, body: unknown): string {
+  const base = `HTTP ${status}${statusText ? ` ${statusText}` : ""}`;
+  const message = extractErrorMessage(body);
+  return message ? `${base} — ${message}` : base;
+}
+
+/** Best-effort extraction of a provider's human-readable error. */
+function extractErrorMessage(body: unknown): string | undefined {
+  if (typeof body === "string") {
+    return body.slice(0, 300);
+  }
+  if (!body || typeof body !== "object") {
+    return undefined;
+  }
+  // Google returns an *array* of errors; OpenAI an object with `error.message`.
+  const candidates: unknown[] = Array.isArray(body) ? (body as unknown[]) : [body];
+  for (const candidate of candidates) {
+    if (!candidate || typeof candidate !== "object") {
+      continue;
+    }
+    const record = candidate as Record<string, unknown>;
+    const nested = record.error;
+    if (nested && typeof nested === "object") {
+      const message = (nested as Record<string, unknown>).message;
+      if (typeof message === "string" && message.length > 0) {
+        return message.slice(0, 300);
+      }
+    }
+    for (const key of ["message", "detail", "error_description"]) {
+      const value = record[key];
+      if (typeof value === "string" && value.length > 0) {
+        return value.slice(0, 300);
+      }
+    }
+  }
+  return undefined;
 }
 
 /** Builds the request body from the OpenAI-compatible request shape. */

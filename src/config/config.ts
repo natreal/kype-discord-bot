@@ -11,6 +11,7 @@ import {
 } from "./env.schema.js";
 import { ConfigError } from "../utils/errors.js";
 import { safeStringify } from "../utils/serialization.js";
+import { readBuildInfo } from "../runtime/build-info.js";
 
 /**
  * Typed application configuration.
@@ -76,6 +77,20 @@ export interface AppConfig {
     /** Optional persona/tone appended to the agent system prompt. */
     readonly persona: string | undefined;
   };
+
+  /**
+   * Which commit this build came from, stamped by `npm run build`.
+   *
+   * `null` when the stamp is missing (a `tsx` dev run, a fresh clone before the
+   * first build). Verified after a deploy so "the bot restarted" can be told apart
+   * from "the bot is running the code I pushed".
+   */
+  readonly build: {
+    readonly commit: string;
+    readonly subject: string;
+    readonly builtAt: string;
+    readonly dirty: boolean;
+  } | null;
 }
 
 const SECRET_KEYS = ["token", "url"] as const;
@@ -110,6 +125,7 @@ function buildConfig(env: Env): AppConfig {
       defaultTrigger: env.AI_DEFAULT_TRIGGER,
       persona: env.AI_PERSONA,
     },
+    build: readBuildInfo(),
   };
 }
 
