@@ -224,6 +224,13 @@ async function handleDeploy(
         ? "This server already had the current commands, so nothing was re-registered."
         : `Registered **${result.commands}** command(s) in this server.`;
 
+  // Read from this process's own payload, which is exactly what was sent: if a
+  // command is missing here, the running build does not contain it.
+  const payloadNames = deployment
+    .deployableCommands()
+    .map((command) => command.name)
+    .sort((left, right) => left.localeCompare(right));
+
   const embed = brandedEmbed("Command deployment")
     .setDescription(summary)
     .addFields(
@@ -241,6 +248,13 @@ async function handleDeploy(
         inline: true,
       },
     )
+    .addFields({
+      // The names, not just the count. A count alone cannot answer "did my new
+      // command ship?" -- and a stale build reports the same number as a current
+      // one, so an operator is left comparing totals by eye and guessing.
+      name: `Registered (${payloadNames.length})`,
+      value: payloadNames.join(", ").slice(0, 1024) || "none",
+    })
     .setFooter({
       text:
         result.skipped && result.action !== "global"
@@ -319,7 +333,9 @@ async function handleUpdate(
           { name: "Requested by", value: actor, inline: true },
           {
             name: "Currently running",
-            value: build ? `${build.commit.slice(0, 7)}${build.dirty ? " (dirty)" : ""}` : "unbuilt",
+            value: build
+              ? `${build.commit.slice(0, 7)}${build.dirty ? " (dirty)" : ""}`
+              : "unbuilt",
             inline: true,
           },
           { name: "Marker", value: `\`${path.basename(markerPath)}\``, inline: true },
@@ -402,6 +418,13 @@ async function handleUpdateStatus(
       {
         name: "Match",
         value: matches ? "yes" : "no",
+        inline: true,
+      },
+      {
+        // Answers "does the *running* code contain the command I just added?"
+        // without needing a successful deploy first.
+        name: "Commands in this build",
+        value: String(context.deployment.deployableCommands().length),
         inline: true,
       },
     )
