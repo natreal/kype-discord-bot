@@ -18,9 +18,18 @@
  *      claims a percentage.
  */
 import { describe, expect, it, vi } from "vitest";
+import type { ChatInputCommandInteraction } from "discord.js";
 
-import type { GitHubClient, GitHubRequest, GitHubResult } from "../../src/services/github/client.js";
-import { EMPTY_CACHE, RepositoryProbe, type RepositoryCache } from "../../src/services/anyps5/repository.probe.js";
+import type {
+  GitHubClient,
+  GitHubRequest,
+  GitHubResult,
+} from "../../src/services/github/client.js";
+import {
+  EMPTY_CACHE,
+  RepositoryProbe,
+  type RepositoryCache,
+} from "../../src/services/anyps5/repository.probe.js";
 import { RepositoryMonitorService } from "../../src/modules/repository/repository.service.js";
 import { deriveEvents } from "../../src/modules/repository/repository.events.js";
 import { buildReportContent } from "../../src/modules/repository/repository-report.content.js";
@@ -28,7 +37,8 @@ import type { ProgressEvent } from "../../src/services/anyps5/repository.types.j
 import type { SnapshotRecord } from "../../src/modules/repository/repository.types.js";
 import { testLogger } from "../helpers/logger.js";
 import { memoryMonitorRepository } from "../helpers/repository.js";
-import { explainRefreshFailure } from "../../src/commands/utility/github.js";
+import githubCommand, { explainRefreshFailure } from "../../src/commands/utility/github.js";
+import type { CommandExecutionContext } from "../../src/commands/context.js";
 
 const NOW = new Date("2026-10-23T12:00:00.000Z");
 
@@ -184,7 +194,10 @@ function harness(options: {
       ...(options.pulls === undefined ? {} : { pulls: options.pulls }),
     }),
     target: { owner: "boykopovar", repo: "AnyPS5", branch: "main" },
-    fetchImpl: fakeFetchQueue(options.progress ?? [progressBody(5_543, 47.39)], options.progressStatus ?? 200),
+    fetchImpl: fakeFetchQueue(
+      options.progress ?? [progressBody(5_543, 47.39)],
+      options.progressStatus ?? 200,
+    ),
   });
   // Records what was published, including the events, so a test can assert the
   // message and the snapshot agree.
@@ -229,7 +242,6 @@ function snapshot(overrides: Partial<SnapshotRecord["state"]> = {}): SnapshotRec
     failures: [],
   };
 }
-
 
 describe("refreshing", () => {
   it("records a baseline and announces nothing on the first refresh", async () => {
@@ -284,10 +296,7 @@ describe("refreshing", () => {
 
   it("says nothing at all when an unchanged repository is refreshed again", async () => {
     const { monitor, repository, report } = harness({
-      commits: [
-        [commitPayload("aaa111", "feat: first")],
-        [commitPayload("aaa111", "feat: first")],
-      ],
+      commits: [[commitPayload("aaa111", "feat: first")], [commitPayload("aaa111", "feat: first")]],
       pulls: [[], []],
     });
 
@@ -373,10 +382,15 @@ describe("event derivation", () => {
   };
 
   it("reports a regression as a decrease instead of hiding it", () => {
-    const events = deriveEvents(reading, snapshot({ libraryPercent: 47.49, shaderPercent: 100 }), [], {
-      created: [],
-      merged: [],
-    });
+    const events = deriveEvents(
+      reading,
+      snapshot({ libraryPercent: 47.49, shaderPercent: 100 }),
+      [],
+      {
+        created: [],
+        merged: [],
+      },
+    );
 
     expect(events[0]?.text).toContain("📉");
     expect(events[0]?.text).toContain("47.49% → 47.39%");
@@ -488,8 +502,6 @@ describe("report content", () => {
   });
 });
 
-
-
 describe("conditional requests", () => {
   /** A probe over a GitHub client whose list endpoints are scripted. */
   function probeWith(client: GitHubClient, progress: unknown[] = []): RepositoryProbe {
@@ -536,7 +548,10 @@ describe("conditional requests", () => {
 
   it("keeps the previous ETag when an endpoint answers 304", async () => {
     const probe = probeWith(fakeClient({ notModified: true }));
-    const cache: RepositoryCache = { commitsEtag: "etag-old-commits", pullRequestsEtag: "etag-old-pulls" };
+    const cache: RepositoryCache = {
+      commitsEtag: "etag-old-commits",
+      pullRequestsEtag: "etag-old-pulls",
+    };
 
     const result = await probe.read(cache);
 
@@ -570,7 +585,7 @@ describe("conditional requests", () => {
 describe("explainRefreshFailure", () => {
   it("names the missing migration when the tables are absent", () => {
     const message = explainRefreshFailure(
-      new Error('The table `public.repository_snapshots` does not exist in the current database.'),
+      new Error("The table `public.repository_snapshots` does not exist in the current database."),
     );
     expect(message).toContain("prisma migrate deploy");
     expect(message).toContain("V9 tables");
@@ -585,9 +600,9 @@ describe("explainRefreshFailure", () => {
   });
 
   it("names an unreachable database", () => {
-    expect(explainRefreshFailure(new Error("Can't reach database server at localhost:5432"))).toContain(
-      "DATABASE_URL",
-    );
+    expect(
+      explainRefreshFailure(new Error("Can't reach database server at localhost:5432")),
+    ).toContain("DATABASE_URL");
   });
 
   it("falls back to the error message, truncated to fit an embed", () => {
@@ -601,4 +616,53 @@ describe("explainRefreshFailure", () => {
   });
 });
 
+/**
+ * `/github` never acknowledged its interaction: every subcommand answered with
+ * `editReply`, which discord.js rejects with `InteractionNotReplied` unless the
+ * interaction was deferred first. The user was told "The application did not
+ * respond" and the log filled with stack traces. This stub enforces the same
+ * rule discord.js does, so a missing acknowledgement fails here rather than in
+ * production.
+ */
+describe("/github interaction acknowledgement", () => {
+  const monitor = {
+    fullName: "boykopovar/AnyPS5",
+    history: () => Promise.resolve<SnapshotRecord[]>([]),
+    refresh: () => Promise.reject(new Error("refresh requires server.settings")),
+  } as unknown as RepositoryMonitorService;
 
+  const context = { repositoryMonitor: monitor } as unknown as CommandExecutionContext;
+
+  /** A chat-input interaction that refuses `editReply` until it is deferred. */
+  function interactionFor(subcommand: string): ChatInputCommandInteraction {
+    let deferred = false;
+    return {
+      options: {
+        getSubcommand: () => subcommand,
+        getInteger: () => null,
+      },
+      member: null,
+      replied: false,
+      get deferred() {
+        return deferred;
+      },
+      deferReply: () => {
+        deferred = true;
+        return Promise.resolve();
+      },
+      editReply: () =>
+        deferred
+          ? Promise.resolve()
+          : Promise.reject(new Error("DiscordjsError [InteractionNotReplied]")),
+    } as unknown as ChatInputCommandInteraction;
+  }
+
+  it.each(["status", "history", "refresh"])(
+    "acknowledges `/github %s` before replying",
+    async (subcommand) => {
+      await expect(
+        githubCommand.execute(interactionFor(subcommand), context),
+      ).resolves.toBeUndefined();
+    },
+  );
+});

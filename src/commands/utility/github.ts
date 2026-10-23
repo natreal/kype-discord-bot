@@ -10,7 +10,12 @@
  * database, so it works with no network access and never disagrees with the
  * hourly report.
  */
-import { GuildMember, SlashCommandBuilder, type ChatInputCommandInteraction } from "discord.js";
+import {
+  GuildMember,
+  MessageFlags,
+  SlashCommandBuilder,
+  type ChatInputCommandInteraction,
+} from "discord.js";
 
 import { defineSlashCommand } from "../define.js";
 import type { CommandExecutionContext } from "../context.js";
@@ -57,10 +62,18 @@ export default defineSlashCommand({
     ),
 
   execute: async (interaction, context) => {
+    // Discord gives an interaction three seconds to be acknowledged. `refresh` reads
+    // the database and three HTTP sources, and `status`/`history` read the database,
+    // so the answer has to be deferred first: without it `editReply` throws
+    // `InteractionNotReplied` and the user is told the application did not respond.
+    await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+
     const monitor = context.repositoryMonitor;
     if (!monitor) {
       await interaction.editReply({
-        embeds: [errorEmbed("GitHub monitor", "The repository monitor is not wired in this process.")],
+        embeds: [
+          errorEmbed("GitHub monitor", "The repository monitor is not wired in this process."),
+        ],
       });
       return;
     }
@@ -190,7 +203,10 @@ async function handleRefresh(
   if (!allowed) {
     await interaction.editReply({
       embeds: [
-        errorEmbed("GitHub monitor", "Taking a snapshot requires the `server.settings` permission."),
+        errorEmbed(
+          "GitHub monitor",
+          "Taking a snapshot requires the `server.settings` permission.",
+        ),
       ],
     });
     return;
@@ -201,11 +217,14 @@ async function handleRefresh(
     // nothing and leaves a broken deployment looking like a bot bug. Reading the
     // snapshot touches the database and three HTTP sources, so the failure is almost
     // always one of two things an operator can act on, and saying which costs nothing.
-    throw new AppError(`GitHub monitor could not record a snapshot: ${explainRefreshFailure(error)}`, {
-      code: "REPOSITORY_REFRESH_FAILED",
-      expected: true,
-      cause: error,
-    });
+    throw new AppError(
+      `GitHub monitor could not record a snapshot: ${explainRefreshFailure(error)}`,
+      {
+        code: "REPOSITORY_REFRESH_FAILED",
+        expected: true,
+        cause: error,
+      },
+    );
   });
   const lines = [
     report.baseline
@@ -295,4 +314,3 @@ function progressFromSnapshot(snapshot: SnapshotRecord) {
 
 /** Re-exported so the history command's formatting is testable. */
 export { percentCell, progressFromSnapshot };
-
