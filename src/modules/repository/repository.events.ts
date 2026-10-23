@@ -15,7 +15,10 @@
  *   times an hour, so new commits are summarized as up to three subjects plus a
  *   count rather than one line per commit.
  * - **A merge is a transition.** A pull request already merged before the watch
- *   existed is never announced, which is why the store reports transitions.
+ *   existed is never announced, which is why the store reports transitions. A
+ *   merge also has to be *recent*: the closed window is ordered by update time, so
+ *   commenting on a pull request merged last week resurfaces it, and that is not
+ *   news.
  */
 import type { ProgressEvent, RepositoryReading } from "../../services/anyps5/repository.types.js";
 import { roundPercent } from "../../services/anyps5/progress.js";
@@ -25,6 +28,14 @@ import type { SnapshotRecord } from "./repository.types.js";
 const COMMIT_HEADLINES = 3;
 /** A subject longer than this is shortened; a Discord line must stay scannable. */
 const SUBJECT_LIMIT = 90;
+/**
+ * How old a merge may be and still be announced.
+ *
+ * Six hours is several refresh intervals of slack for a run that failed, and short
+ * enough that a pull request merged days ago — resurfaced because someone
+ * commented on it — stays out of the channel.
+ */
+const MERGE_NEWS_WINDOW_MS = 6 * 3_600_000;
 
 /**
  * @param reading the freshly fetched state.
@@ -79,7 +90,12 @@ export function deriveEvents(
     events.push(pull);
   }
 
-  const stars = counterEvent("stars", "★ Stars", reading.facts.stars, previous?.state.stars ?? null);
+  const stars = counterEvent(
+    "stars",
+    "★ Stars",
+    reading.facts.stars,
+    previous?.state.stars ?? null,
+  );
   if (stars !== null) {
     events.push(stars);
   }
@@ -129,18 +145,30 @@ function pullEvents(
 
   for (const number of pulls.merged) {
     const pull = reading.pullRequests.find((candidate) => candidate.number === number);
-    if (pull !== undefined) {
-      events.push({
-        kind: "pull-request",
-        key: `pull-request:${number}:merged`,
-        text: `**Merged** PR #${number} — ${truncate(pull.title, SUBJECT_LIMIT)}${by(pull.author)}`,
-      });
+    if (pull === undefined) {
+      continue;
     }
+    // The merged pull request is usually first seen through the closed window, so
+    // "the store has no row" says nothing about when it merged. Only a merge inside
+    // the news window is announced: otherwise a comment on an old pull request would
+    // resurface a decision taken days ago.
+    if (
+      pull.mergedAt !== null &&
+      reading.fetchedAt.getTime() - pull.mergedAt.getTime() > MERGE_NEWS_WINDOW_MS
+    ) {
+      continue;
+    }
+    events.push({
+      kind: "pull-request",
+      key: `pull-request:${number}:merged`,
+      text: `**Merged** PR #${number} — ${truncate(pull.title, SUBJECT_LIMIT)}${by(pull.author)}`,
+    });
   }
 
   for (const number of pulls.created) {
     // A merge already produced a line for this pull request; announcing both would
-    // describe one change twice.
+    // describe one change twice. (The store only reports openings for pull requests
+    // that are still open, so this is a guard, not the usual path.)
     const pull = merged.has(number)
       ? undefined
       : reading.pullRequests.find((candidate) => candidate.number === number);
@@ -227,4 +255,3 @@ export function truncate(text: string, limit: number): string {
   const space = cut.lastIndexOf(" ");
   return `${space > limit / 2 ? cut.slice(0, space) : cut}…`;
 }
-

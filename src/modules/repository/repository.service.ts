@@ -12,7 +12,9 @@
  *   the first refresh that sees a commit stores it and announces it, and every later
  *   refresh finds it already there.
  * - **A pull request's *merge* is announced once.** Before/after state comes from the
- *   stored row, so "opened" and "merged" are two events, never two rows.
+ *   stored row, so "opened" and "merged" are two events, never two rows. The merge
+ *   is also the reason the probe reads two GitHub windows: by the time a pull request
+ *   merges it is long out of the newest-created one.
  * - **An announcement is claimed before it is sent.** `claimEvents` inserts into a
  *   unique index, so a retried task cannot repeat a message even if it failed
  *   halfway through posting.
@@ -28,7 +30,12 @@ import {
   PULL_REQUEST_WINDOW,
   type RepositoryCache,
 } from "../../services/anyps5/repository.probe.js";
-import { toReportedState, type ProgressEvent, type RepositoryReading } from "../../services/anyps5/repository.types.js";
+import {
+  toReportedState,
+  type ProgressEvent,
+  type RepositoryPullRequest,
+  type RepositoryReading,
+} from "../../services/anyps5/repository.types.js";
 import type {
   MonitorRecord,
   RepositoryMonitorRepository,
@@ -154,7 +161,9 @@ export class RepositoryMonitorService {
       progressCommit: reading.progressCommit,
       progress: reading.progress,
       commitCount: Math.min(reading.commits.length, COMMIT_WINDOW),
-      pullCount: Math.min(reading.pullRequests.length, PULL_REQUEST_WINDOW),
+      // Both pull-request windows are counted: `pullCount` says how many rows the
+      // reading held, not how many fit in one window.
+      pullCount: reading.pullRequests.length,
       failures,
     });
     await this.repository.saveSyncState(record.id, {
@@ -165,9 +174,7 @@ export class RepositoryMonitorService {
     });
     await this.prune(record.id);
 
-    const events = announce
-      ? deriveEvents(reading, previous, commitShas, pullResult)
-      : [];
+    const events = announce ? deriveEvents(reading, previous, commitShas, pullResult) : [];
     const claimed = events.length === 0 ? [] : await this.repository.claimEvents(record.id, events);
     // Nothing changed and nothing new: no message. An hourly "still 47.39%" would
     // train the channel to ignore the bot, which is the failure mode worth avoiding.
@@ -211,6 +218,20 @@ export class RepositoryMonitorService {
     return this.repository.latestSnapshot(record.id);
   }
 
+  /**
+   * The pull requests the last refresh stored, newest created first.
+   *
+   * `/github status` renders a snapshot, so it reads this rather than the network:
+   * a command that fetched would show pull requests from a different moment than
+   * the percentages beside them.
+   */
+  public async recentPullRequests(
+    limit = PULL_REQUEST_WINDOW,
+  ): Promise<readonly RepositoryPullRequest[]> {
+    const record = await this.ensureWatched();
+    return this.repository.recentPullRequests(record.id, limit);
+  }
+
   /** Deletes snapshots beyond the retention window. */
   private async prune(repositoryId: string): Promise<void> {
     const cutoff = new Date(this.now().getTime() - SNAPSHOT_RETENTION * 3_600_000);
@@ -239,4 +260,3 @@ export class RepositoryMonitorService {
     }
   }
 }
-

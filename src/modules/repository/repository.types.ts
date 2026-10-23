@@ -5,7 +5,11 @@
  * and the backup module do, so its rules — deduplication, event derivation, history
  * windows — are testable against an in-memory store.
  */
-import type { ReportedState, RepositoryCommit, RepositoryPullRequest } from "../../services/anyps5/repository.types.js";
+import type {
+  ReportedState,
+  RepositoryCommit,
+  RepositoryPullRequest,
+} from "../../services/anyps5/repository.types.js";
 import type { AnyPs5Progress } from "../../services/anyps5/progress.js";
 
 /** A watched repository, as stored. */
@@ -97,13 +101,27 @@ export interface RepositoryMonitorRepository {
   /**
    * Stores a window of pull requests, updating state in place.
    *
-   * @returns the events worth announcing: a pull request that is new, and one that
-   * has just been merged.
+   * @returns the events worth announcing: a pull request that is new **and still
+   * open** — one first seen already closed is history, not news — and one whose
+   * merge this refresh is the first to record. A merge is included even when the
+   * row was never seen before, because a merged pull request usually reaches the
+   * monitor through the closed window, days after it was created.
    */
   upsertPullRequests(
     repositoryId: string,
     pulls: readonly RepositoryPullRequest[],
-  ): Promise<{ readonly created: number[]; readonly merged: number[] }>;
+  ): Promise<{ readonly created: readonly number[]; readonly merged: readonly number[] }>;
+
+  /**
+   * The newest stored pull requests, by creation, for the snapshot views.
+   *
+   * Read from storage rather than re-fetched: `/github status` describes one
+   * snapshot, and a command that went to GitHub would mix two moments in one embed.
+   */
+  recentPullRequests(
+    repositoryId: string,
+    limit: number,
+  ): Promise<readonly RepositoryPullRequest[]>;
 
   /**
    * Records `events` as announced, atomically.

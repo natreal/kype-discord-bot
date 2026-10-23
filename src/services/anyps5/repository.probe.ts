@@ -10,6 +10,12 @@
  * implementation statistics, and a repository that publishes no `progress.json`
  * must still yield commits: losing a whole snapshot to one failing endpoint would
  * make the hourly history patchy for no reason.
+ *
+ * Pull requests are read through **two** windows, because one cannot answer both
+ * questions the monitor asks. "What was opened" is the newest-created window; "what
+ * was merged" is the recently-updated closed one. A pull request is merged days
+ * after it was created, so by then the created window has moved past it — with a
+ * single window the monitor announced openings forever and never a merge.
  */
 import type { GitHubClient } from "../github/client.js";
 import { toError } from "../../utils/errors.js";
@@ -60,6 +66,11 @@ export interface RepositoryProbeOptions {
   /** Overridable so tests do not touch the network. */
   readonly progressUrl?: string;
   readonly fetchImpl?: typeof fetch;
+  /**
+   * Overridable so a test can pin the reading's timestamp. The merge rules compare
+   * `mergedAt` against `fetchedAt`, and a wall clock would make them time-dependent.
+   */
+  readonly now?: () => Date;
 }
 
 export const EMPTY_CACHE: RepositoryCache = { commitsEtag: null, pullRequestsEtag: null };
@@ -69,12 +80,14 @@ export class RepositoryProbe {
   private readonly target: RepositoryTarget;
   private readonly progressUrl: string;
   private readonly fetchImpl: typeof fetch;
+  private readonly now: () => Date;
 
   public constructor(options: RepositoryProbeOptions) {
     this.client = options.client;
     this.target = options.target;
     this.progressUrl = options.progressUrl ?? PROGRESS_URL;
     this.fetchImpl = options.fetchImpl ?? globalThis.fetch;
+    this.now = options.now ?? (() => new Date());
   }
 
   /** The `owner/repo` string used in URLs and rendered by the bot. */
@@ -93,19 +106,22 @@ export class RepositoryProbe {
     const branch = this.target.branch ?? facts?.defaultBranch ?? "main";
 
     // Sequential where it costs nothing and parallel where it saves a round trip:
-    // the branch is only known after the repository call, and the other three are
+    // the branch is only known after the repository call, and the others are
     // independent of each other.
-    const [progress, commits, pullRequests] = await Promise.all([
+    const [progress, commits, pullRequests, closedPullRequests] = await Promise.all([
       this.readProgress(),
       this.readCommits(branch, cache.commitsEtag),
       this.readPullRequests(cache.pullRequestsEtag),
+      this.readClosedPullRequests(),
     ]);
 
     const failures = [
       ...(facts === null ? ["repository"] : []),
       ...(progress.progress === null ? ["progress"] : []),
       ...(commits.entries === null ? ["commits"] : []),
-      ...(pullRequests.entries === null ? ["pull-requests"] : []),
+      // One label for both pull-request windows: the picture is incomplete either
+      // way, and an operator reading the snapshot does not need to know which half.
+      ...(pullRequests.entries === null || closedPullRequests === null ? ["pull-requests"] : []),
     ];
 
     return {
@@ -115,8 +131,8 @@ export class RepositoryProbe {
         progressUnavailable: progress.reason,
         progressCommit: progress.commit,
         commits: commits.entries ?? [],
-        pullRequests: pullRequests.entries ?? [],
-        fetchedAt: new Date(),
+        pullRequests: mergePullRequests(pullRequests.entries ?? [], closedPullRequests ?? []),
+        fetchedAt: this.now(),
       },
       cache: {
         commitsEtag: commits.etag ?? cache.commitsEtag,
@@ -173,7 +189,11 @@ export class RepositoryProbe {
     }
 
     if (!response.ok) {
-      return { progress: null, reason: `progress.json answered HTTP ${response.status}`, commit: null };
+      return {
+        progress: null,
+        reason: `progress.json answered HTTP ${response.status}`,
+        commit: null,
+      };
     }
 
     const text = await response.text().catch(() => "");
@@ -205,7 +225,10 @@ export class RepositoryProbe {
   private async readCommits(
     branch: string,
     etag: string | null,
-  ): Promise<{ readonly entries: readonly RepositoryCommit[] | null; readonly etag: string | null }> {
+  ): Promise<{
+    readonly entries: readonly RepositoryCommit[] | null;
+    readonly etag: string | null;
+  }> {
     const result = await this.client.request({
       path: `${repositoryPath(this.target)}/commits`,
       query: { sha: branch, per_page: COMMIT_WINDOW },
@@ -229,9 +252,7 @@ export class RepositoryProbe {
   }
 
   /** Fetches recent pull requests, newest first, open and closed. */
-  private async readPullRequests(
-    etag: string | null,
-  ): Promise<{
+  private async readPullRequests(etag: string | null): Promise<{
     readonly entries: readonly RepositoryPullRequest[] | null;
     readonly etag: string | null;
   }> {
@@ -252,6 +273,50 @@ export class RepositoryProbe {
     }
     return { entries: body.flatMap(toPullRequest), etag: result.response.etag };
   }
+
+  /**
+   * Fetches the pull requests that closed or merged most recently.
+   *
+   * This is the window that makes a merge visible at all: `readPullRequests` is
+   * ordered by creation, and this repository creates more pull requests in an hour
+   * than that window holds, so a pull request is long gone from it by the time it
+   * merges. GitHub offers no `sort=merged`, but a merged pull request is *updated*
+   * when it merges, so `state=closed&sort=updated` carries the merges. A comment on
+   * an old closed pull request drifts into this window too, which costs one stale
+   * row and no announcement — the event rules discard it.
+   *
+   * Deliberately unconditional: an `ETag` on this window would hand back `304` for
+   * the exact change it exists to find, and one extra call per refresh is a price
+   * worth paying for merges that arrive.
+   */
+  private async readClosedPullRequests(): Promise<readonly RepositoryPullRequest[] | null> {
+    const result = await this.client.request({
+      path: `${repositoryPath(this.target)}/pulls`,
+      query: { state: "closed", sort: "updated", direction: "desc", per_page: PULL_REQUEST_WINDOW },
+    });
+    if (!result.ok || result.response.notModified) {
+      return null;
+    }
+    const body = result.response.body;
+    return Array.isArray(body) ? body.flatMap(toPullRequest) : null;
+  }
+}
+
+/**
+ * Combines the newest-created window with the recently-closed one.
+ *
+ * Keyed by number, so a pull request both windows hold is stored and announced once.
+ * Sorted newest-created first, which is the order the report's open list expects,
+ * and which puts the stale-then-updated rows at the end rather than the front.
+ */
+function mergePullRequests(
+  created: readonly RepositoryPullRequest[],
+  closed: readonly RepositoryPullRequest[],
+): RepositoryPullRequest[] {
+  const numbers = new Set(created.map((pull) => pull.number));
+  return [...created, ...closed.filter((pull) => !numbers.has(pull.number))].sort(
+    (left, right) => right.createdAt.getTime() - left.createdAt.getTime(),
+  );
 }
 
 /** The `repos/{owner}/{repo}` path, shared by every endpoint below. */
@@ -314,9 +379,7 @@ function toCommit(value: unknown): RepositoryCommit[] {
       message: message.split("\n")[0] ?? "",
       author: typeof author?.["name"] === "string" ? author["name"] : null,
       committedAt:
-        asDate(author?.["date"]) ??
-        asDate(asRecord(commit["committer"])?.["date"]) ??
-        new Date(0),
+        asDate(author?.["date"]) ?? asDate(asRecord(commit["committer"])?.["date"]) ?? new Date(0),
       url: typeof row["html_url"] === "string" ? row["html_url"] : "",
     },
   ];
@@ -346,7 +409,3 @@ function toPullRequest(value: unknown): RepositoryPullRequest[] {
     },
   ];
 }
-
-
-
-

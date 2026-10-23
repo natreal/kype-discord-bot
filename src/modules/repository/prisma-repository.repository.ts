@@ -9,7 +9,10 @@
  */
 import type { PrismaDatabaseClient } from "../../services/database/index.js";
 import { toDatabaseError, toJson, toNullableJson } from "../../services/database/index.js";
-import type { RepositoryCommit, RepositoryPullRequest } from "../../services/anyps5/repository.types.js";
+import type {
+  RepositoryCommit,
+  RepositoryPullRequest,
+} from "../../services/anyps5/repository.types.js";
 import type {
   MonitorRecord,
   PendingEvent,
@@ -188,7 +191,7 @@ export class PrismaRepositoryMonitorRepository implements RepositoryMonitorRepos
   public async upsertPullRequests(
     repositoryId: string,
     pulls: readonly RepositoryPullRequest[],
-  ): Promise<{ readonly created: number[]; readonly merged: number[] }> {
+  ): Promise<{ readonly created: readonly number[]; readonly merged: readonly number[] }> {
     if (pulls.length === 0) {
       return { created: [], merged: [] };
     }
@@ -218,15 +221,38 @@ export class PrismaRepositoryMonitorRepository implements RepositoryMonitorRepos
       }
 
       return {
-        created: pulls.filter((pull) => !known.has(pull.number)).map((pull) => pull.number),
+        // A pull request first seen already closed was not "opened" as far as the
+        // channel is concerned: reporting it would announce a decision as if it
+        // were still pending. These rows reach the store through the closed window.
+        created: pulls
+          .filter((pull) => !known.has(pull.number) && pull.state === "open")
+          .map((pull) => pull.number),
         // "Merged" is a transition, not a state: a pull request merged before this
-        // watch existed must not be announced on the first refresh.
+        // watch existed must not be announced on the first refresh. A row the table
+        // has never seen counts as a transition, because that is how a merge arrives
+        // here — through the closed window, long after the created window moved on.
         merged: pulls
-          .filter((pull) => pull.merged && known.get(pull.number) === false)
+          .filter((pull) => pull.merged && known.get(pull.number) !== true)
           .map((pull) => pull.number),
       };
     } catch (error) {
       throw toDatabaseError(error, "repository.upsertPullRequests");
+    }
+  }
+
+  public async recentPullRequests(
+    repositoryId: string,
+    limit: number,
+  ): Promise<readonly RepositoryPullRequest[]> {
+    try {
+      const rows = await this.prisma.repositoryPullRequestRecord.findMany({
+        where: { repositoryId },
+        orderBy: { createdAt: "desc" },
+        take: limit,
+      });
+      return rows.map(toPullRequestRecord);
+    } catch (error) {
+      throw toDatabaseError(error, "repository.recentPullRequests");
     }
   }
 
@@ -302,6 +328,32 @@ function toMonitor(row: {
   };
 }
 
+/** Normalizes a stored pull-request row back into the reading's shape. */
+function toPullRequestRecord(row: {
+  number: number;
+  title: string;
+  author: string | null;
+  state: string;
+  draft: boolean;
+  merged: boolean;
+  createdAt: Date;
+  mergedAt: Date | null;
+  url: string;
+}): RepositoryPullRequest {
+  return {
+    number: row.number,
+    title: row.title,
+    author: row.author,
+    // The column holds GitHub's own wording; anything but `open` was closed.
+    state: row.state === "open" ? "open" : "closed",
+    draft: row.draft,
+    merged: row.merged,
+    createdAt: row.createdAt,
+    mergedAt: row.mergedAt,
+    url: row.url,
+  };
+}
+
 /**
  * Normalizes a snapshot row.
  *
@@ -348,4 +400,3 @@ function toSnapshot(row: {
       : [],
   };
 }
-

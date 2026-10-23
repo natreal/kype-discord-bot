@@ -33,7 +33,10 @@ import {
 import { RepositoryMonitorService } from "../../src/modules/repository/repository.service.js";
 import { deriveEvents } from "../../src/modules/repository/repository.events.js";
 import { buildReportContent } from "../../src/modules/repository/repository-report.content.js";
-import type { ProgressEvent } from "../../src/services/anyps5/repository.types.js";
+import type {
+  ProgressEvent,
+  RepositoryPullRequest,
+} from "../../src/services/anyps5/repository.types.js";
 import type { SnapshotRecord } from "../../src/modules/repository/repository.types.js";
 import { testLogger } from "../helpers/logger.js";
 import { memoryMonitorRepository } from "../helpers/repository.js";
@@ -78,11 +81,15 @@ function commitPayload(sha: string, message: string): unknown {
 }
 
 /** A pull-request payload in GitHub's shape. */
-function pullPayload(number: number, options: { merged?: boolean } = {}): unknown {
+function pullPayload(
+  number: number,
+  options: { merged?: boolean; closed?: boolean } = {},
+): unknown {
+  const closed = options.merged === true || options.closed === true;
   return {
     number,
     title: `Refactor #${number}`,
-    state: options.merged === true ? "closed" : "open",
+    state: closed ? "closed" : "open",
     draft: false,
     created_at: "2026-10-23T10:00:00.000Z",
     merged_at: options.merged === true ? "2026-10-23T11:00:00.000Z" : null,
@@ -95,14 +102,18 @@ function pullPayload(number: number, options: { merged?: boolean } = {}): unknow
 function fakeClient(responses: {
   repository?: unknown;
   commits?: unknown[][];
+  /** Queue for the newest-created window (`state=all&sort=created`). */
   pulls?: unknown[][];
-  /** When true, every list endpoint answers `304 Not Modified`. */
+  /** Queue for the recently-closed window (`state=closed&sort=updated`). */
+  closedPulls?: unknown[][];
+  /** When true, every conditional list endpoint answers `304 Not Modified`. */
   notModified?: boolean;
 }): GitHubClient & { readonly calls: string[]; readonly requests: GitHubRequest[] } {
   const calls: string[] = [];
   const requests: GitHubRequest[] = [];
   const commits = [...(responses.commits ?? [])];
   const pulls = [...(responses.pulls ?? [])];
+  const closedPulls = [...(responses.closedPulls ?? [])];
   const etag = (path: string): string => `etag-${path.split("/").at(-1) ?? path}`;
   const ok = (body: unknown, path: string): GitHubResult => ({
     ok: true,
@@ -123,7 +134,13 @@ function fakeClient(responses: {
     request: (request) => {
       calls.push(request.path);
       requests.push(request);
-      if (responses.notModified === true && /\/pulls$|\/commits$/.test(request.path)) {
+      // Only a call that *sent* an ETag can be answered `304`. The recently-closed
+      // window is deliberately unconditional, so it must still get its payload.
+      if (
+        responses.notModified === true &&
+        request.etag !== undefined &&
+        /\/pulls$|\/commits$/.test(request.path)
+      ) {
         return Promise.resolve({
           ok: true,
           response: {
@@ -143,7 +160,10 @@ function fakeClient(responses: {
         return Promise.resolve(ok(page ?? [], request.path));
       }
       if (request.path.endsWith("/pulls")) {
-        const page = pulls.length > 1 ? pulls.shift() : pulls[0];
+        // Two windows, two queues: they answer different questions and a test that
+        // scripted one must not silently consume the other.
+        const queue = request.query?.["state"] === "closed" ? closedPulls : pulls;
+        const page = queue.length > 1 ? queue.shift() : queue[0];
         return Promise.resolve(ok(page ?? [], request.path));
       }
       return Promise.resolve(
@@ -185,6 +205,7 @@ function harness(options: {
   readonly progress?: unknown[];
   readonly commits?: unknown[][];
   readonly pulls?: unknown[][];
+  readonly closedPulls?: unknown[][];
   readonly progressStatus?: number;
 }) {
   const repository = memoryMonitorRepository();
@@ -192,12 +213,16 @@ function harness(options: {
     client: fakeClient({
       ...(options.commits === undefined ? {} : { commits: options.commits }),
       ...(options.pulls === undefined ? {} : { pulls: options.pulls }),
+      ...(options.closedPulls === undefined ? {} : { closedPulls: options.closedPulls }),
     }),
     target: { owner: "boykopovar", repo: "AnyPS5", branch: "main" },
     fetchImpl: fakeFetchQueue(
       options.progress ?? [progressBody(5_543, 47.39)],
       options.progressStatus ?? 200,
     ),
+    // Pinned to the same clock the service uses, so the fixtures' timestamps mean
+    // something: `mergedAt` is judged against the reading's `fetchedAt`.
+    now: () => NOW,
   });
   // Records what was published, including the events, so a test can assert the
   // message and the snapshot agree.
@@ -324,6 +349,41 @@ describe("refreshing", () => {
     expect(merged[0]?.text).toContain("**Merged** PR #7");
   });
 
+  it("announces a merge that only the recently-closed window can see", async () => {
+    const { monitor, repository } = harness({
+      commits: [[], []],
+      // The created window never holds #7: it was opened days before the watch, and
+      // this repository opens more pull requests per hour than that window keeps.
+      pulls: [[], []],
+      closedPulls: [[], [pullPayload(7, { merged: true })]],
+    });
+
+    const first = await monitor.refresh();
+    const second = await monitor.refresh();
+
+    expect(first.baseline).toBe(true);
+    expect(first.announced).toBe(0);
+    const merged = repository.events.filter((event) => event.key === "pull-request:7:merged");
+    expect(merged).toHaveLength(1);
+    expect(second.announced).toBe(1);
+  });
+
+  it("stores a pull request first seen closed without announcing it as opened", async () => {
+    const { monitor, repository } = harness({
+      commits: [[], []],
+      pulls: [[], []],
+      // Closed without a merge: the bot never saw it open, so it is history.
+      closedPulls: [[], [pullPayload(11, { closed: true })]],
+    });
+
+    await monitor.refresh();
+    const second = await monitor.refresh();
+
+    expect(second.announced).toBe(0);
+    expect(repository.pulls.map((pull) => pull.number)).toEqual([11]);
+    expect(repository.events).toEqual([]);
+  });
+
   it("stores a null percentage when progress.json is unavailable", async () => {
     const { monitor, repository } = harness({ progressStatus: 503, commits: [[], []] });
 
@@ -435,6 +495,34 @@ describe("event derivation", () => {
       snapshot({ libraryPercent: 47.39, shaderPercent: 100, stars: 47_118, forks: 4_370 }),
       [],
       { created: [], merged: [] },
+    );
+
+    expect(events).toEqual([]);
+  });
+
+  it("leaves out a merge older than the news window", () => {
+    const events = deriveEvents(
+      {
+        ...reading,
+        pullRequests: [
+          {
+            number: 7,
+            title: "Refactor #7",
+            author: null,
+            state: "closed",
+            draft: false,
+            merged: true,
+            createdAt: new Date(NOW.getTime() - 96 * 3_600_000),
+            // Merged before the window: a comment would resurface it, and that is not
+            // news — the channel would be reporting a decision taken days ago.
+            mergedAt: new Date(NOW.getTime() - 48 * 3_600_000),
+            url: "",
+          },
+        ],
+      },
+      snapshot({ libraryPercent: 47.39, shaderPercent: 100, stars: 47_118, forks: 4_370 }),
+      [],
+      { created: [], merged: [7] },
     );
 
     expect(events).toEqual([]);
@@ -574,6 +662,51 @@ describe("conditional requests", () => {
     // An unreachable endpoint never invents an ETag to send back, and the ones that
     // did answer keep theirs.
     expect(result.cache).toEqual({ commitsEtag: "etag-commits", pullRequestsEtag: "etag-pulls" });
+  });
+});
+
+/**
+ * Two windows, because one cannot answer both questions the monitor asks. This is
+ * the regression the single window caused: the created window holds barely an hour
+ * of this repository, a pull request merges days after it was opened, so no merge
+ * ever appeared in a reading and none was ever announced.
+ */
+describe("pull-request windows", () => {
+  /** A probe over a GitHub client whose two pull windows are scripted. */
+  function probeWith(client: GitHubClient): RepositoryProbe {
+    return new RepositoryProbe({
+      client,
+      target: { owner: "boykopovar", repo: "AnyPS5", branch: "main" },
+      fetchImpl: fakeFetchQueue([], 200),
+    });
+  }
+
+  it("reads a merge from the closed window, which the created window no longer holds", async () => {
+    const client = fakeClient({
+      pulls: [[]],
+      closedPulls: [[pullPayload(7, { merged: true })]],
+    });
+
+    const { reading } = await probeWith(client).read();
+
+    expect(reading.pullRequests.map((pull) => pull.number)).toEqual([7]);
+    expect(reading.pullRequests[0]?.merged).toBe(true);
+    const closed = client.requests.find((request) => request.query?.["state"] === "closed");
+    // A merged pull request is *updated* when it merges; GitHub has no `sort=merged`.
+    expect(closed?.query?.["sort"]).toBe("updated");
+    // Unconditional: an ETag here would answer 304 for the exact change it looks for.
+    expect(closed?.etag).toBeUndefined();
+  });
+
+  it("keeps a pull request that both windows hold once", async () => {
+    const client = fakeClient({
+      pulls: [[pullPayload(7, { merged: true })]],
+      closedPulls: [[pullPayload(7, { merged: true })]],
+    });
+
+    const { reading } = await probeWith(client).read();
+
+    expect(reading.pullRequests).toHaveLength(1);
   });
 });
 
@@ -872,5 +1005,83 @@ describe("/github history window", () => {
 
     expect(history).toHaveBeenCalledWith(25);
     expect(descriptionOf(replies.at(-1)).split("\n")).toHaveLength(25);
+  });
+});
+
+/**
+ * `/github status` described the repository as having "0 open PRs (of the last 0)":
+ * it rebuilt its reading from the stored snapshot and left the pull requests empty,
+ * because they were not in the snapshot. They are stored per refresh, so the view
+ * reads them — and the number it prints is the one the last refresh recorded.
+ */
+describe("/github status pull requests", () => {
+  /** A stored pull request, in the shape the monitor reads back. */
+  function pull(number: number, state: "open" | "closed" = "open"): RepositoryPullRequest {
+    return {
+      number,
+      title: `Refactor #${number}`,
+      author: "Retr0G28",
+      state,
+      draft: false,
+      merged: state === "closed",
+      createdAt: new Date(NOW.getTime() - number * 60_000),
+      mergedAt: state === "closed" ? NOW : null,
+      url: `https://github.com/boykopovar/AnyPS5/pull/${number}`,
+    };
+  }
+
+  /** A snapshot the status view can render, with every published number present. */
+  const latest: SnapshotRecord = {
+    id: "snapshot-1",
+    capturedAt: NOW,
+    state: {
+      stars: 1_000,
+      forks: 100,
+      openIssues: 10,
+      libraryPercent: 57,
+      librariesDone: 6_000,
+      librariesTotal: 11_697,
+      shaderPercent: 63,
+      shadersDone: 300,
+      shadersTotal: 476,
+    },
+    progressCommit: null,
+    commitCount: 0,
+    pullCount: 3,
+    failures: [],
+  };
+
+  it("shows the stored pull requests instead of claiming there are none", async () => {
+    const recentPullRequests = vi.fn(() => Promise.resolve([pull(1), pull(2), pull(3, "closed")]));
+    const context = {
+      repositoryMonitor: {
+        fullName: "boykopovar/AnyPS5",
+        history: () => Promise.resolve([latest]),
+        recentPullRequests,
+      },
+    } as unknown as CommandExecutionContext;
+    const replies: unknown[] = [];
+    const interaction = {
+      options: { getSubcommand: () => "status", getInteger: () => null },
+      member: null,
+      replied: false,
+      deferred: false,
+      deferReply: () => Promise.resolve(),
+      editReply: (payload: unknown) => {
+        replies.push(payload);
+        return Promise.resolve();
+      },
+    } as unknown as ChatInputCommandInteraction;
+
+    await githubCommand.execute(interaction, context);
+
+    const payload = JSON.stringify(replies.at(-1));
+    expect(recentPullRequests).toHaveBeenCalledOnce();
+    expect(payload).toContain("2 open PRs");
+    expect(payload).not.toContain("0 open PRs");
+    // The open ones are named, without pinging their authors.
+    expect(payload).toContain("Open pull requests");
+    expect(payload).toContain("#1 Refactor #1");
+    expect(payload).not.toContain("#3 Refactor #3");
   });
 });

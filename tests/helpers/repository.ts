@@ -10,6 +10,10 @@
  *
  * - `upsertCommits` keeps one row per SHA and returns only the SHAs it had not seen,
  *   which is what makes "announce a commit once" true even across two refreshes;
+ * - `upsertPullRequests` reports the same two things the Prisma implementation does:
+ *   an opening only for a pull request that is new **and open** (a closed one arrives
+ *   through the recently-closed window and is history), and a merge for any row the
+ *   store has not already recorded as merged;
  * - `claimEvents` rejects a duplicate key exactly as the unique index does, so a
  *   replayed announcement is dropped here for the same reason it would be dropped in
  *   the database.
@@ -31,8 +35,24 @@ export interface MemoryMonitorRepository extends RepositoryMonitorRepository {
   readonly monitors: MonitorRecord[];
   readonly snapshots: (SnapshotInput & { readonly id: string })[];
   readonly commits: { repositoryId: string; sha: string }[];
-  readonly pulls: { repositoryId: string; number: number; merged: boolean }[];
+  /** Stored pull requests, in the shape the real table returns. */
+  readonly pulls: (RepositoryPullRequest & { readonly repositoryId: string })[];
   readonly events: PendingEvent[];
+}
+
+/** Strips the storage-only field, leaving the reading's pull-request shape. */
+function toPull(row: RepositoryPullRequest & { repositoryId: string }): RepositoryPullRequest {
+  return {
+    number: row.number,
+    title: row.title,
+    author: row.author,
+    state: row.state,
+    draft: row.draft,
+    merged: row.merged,
+    createdAt: row.createdAt,
+    mergedAt: row.mergedAt,
+    url: row.url,
+  };
 }
 
 /** Builds an isolated store. One per test. */
@@ -40,7 +60,7 @@ export function memoryMonitorRepository(): MemoryMonitorRepository {
   const monitors: MonitorRecord[] = [];
   const snapshots: (SnapshotInput & { readonly id: string })[] = [];
   const commits: { repositoryId: string; sha: string }[] = [];
-  const pulls: { repositoryId: string; number: number; merged: boolean }[] = [];
+  const pulls: (RepositoryPullRequest & { repositoryId: string })[] = [];
   const events: PendingEvent[] = [];
   let counter = 0;
 
@@ -145,16 +165,32 @@ export function memoryMonitorRepository(): MemoryMonitorRepository {
           (row) => row.repositoryId === repositoryId && row.number === pull.number,
         );
         if (existing === undefined) {
-          pulls.push({ repositoryId, number: pull.number, merged: pull.merged });
-          created.push(pull.number);
+          pulls.push({ ...pull, repositoryId });
+          // A pull request first seen closed arrived through the recently-closed
+          // window: it was not "opened" while the bot was watching.
+          if (pull.state === "open") {
+            created.push(pull.number);
+          }
+          if (pull.merged) {
+            merged.push(pull.number);
+          }
           continue;
         }
         if (pull.merged && !existing.merged) {
           merged.push(pull.number);
         }
-        existing.merged = pull.merged;
+        Object.assign(existing, pull);
       }
       return Promise.resolve({ created, merged });
+    },
+
+    recentPullRequests(repositoryId, limit) {
+      const rows = pulls
+        .filter((row) => row.repositoryId === repositoryId)
+        .sort((left, right) => right.createdAt.getTime() - left.createdAt.getTime())
+        .slice(0, limit)
+        .map(toPull);
+      return Promise.resolve(rows);
     },
 
     claimEvents(repositoryId, incoming: readonly PendingEvent[]) {

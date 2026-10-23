@@ -57,7 +57,11 @@ export interface RepositoryReading {
   readonly progressCommit: string | null;
   /** Commits of the measured branch, newest first. */
   readonly commits: readonly RepositoryCommit[];
-  /** Pull requests, newest first. */
+  /**
+   * Pull requests, newest created first: the newest-created window plus the
+   * recently-closed one, deduplicated (see `RepositoryProbe`). Both halves are
+   * needed — the first carries openings, the second carries merges.
+   */
   readonly pullRequests: readonly RepositoryPullRequest[];
   /** When the reading was taken. */
   readonly fetchedAt: Date;

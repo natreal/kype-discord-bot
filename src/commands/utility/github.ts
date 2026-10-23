@@ -122,9 +122,11 @@ async function handleStatus(
   }
 
   const previous = history.at(-2) ?? null;
-  // The stored snapshot is enough to render the numbers; the parts of a report that
-  // need a live reading (open pull requests, the project's own description) are
-  // simply absent here rather than fabricated.
+  // The stored snapshot is enough to render the numbers. Pull requests are stored
+  // per refresh too — reading them is what stops this view from describing the
+  // repository as having "0 open PRs (of the last 0)" — while the project's own
+  // description and the commits are left out rather than fabricated.
+  const pullRequests = await monitor.recentPullRequests();
   const content = buildReportContent(
     {
       facts: {
@@ -142,7 +144,7 @@ async function handleStatus(
         : null,
       progressCommit: latest.progressCommit,
       commits: [],
-      pullRequests: [],
+      pullRequests,
       fetchedAt: latest.capturedAt,
     },
     previous,
