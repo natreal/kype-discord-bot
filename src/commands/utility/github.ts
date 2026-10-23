@@ -36,9 +36,12 @@ export default defineSlashCommand({
     usage: "/github status | history [limit] | refresh",
     examples: ["/github status", "/github history limit:12"],
   },
-  // Read-only for everyone who may use the bot; `refresh` escalates on its own,
-  // because it writes a snapshot and can post to the report channel.
-  permissions: { custom: ["core.use"] },
+  // `status` and `history` only read stored snapshots, so the command declares no
+  // permission of its own: they stay open to every member, the way `/ticket open` is.
+  // `refresh` writes a snapshot and can post to the report channel, so it escalates to
+  // `server.settings` inside its own handler — `core.use` here would have made the two
+  // read-only subcommands staff-only as well, which they are not meant to be.
+  permissions: {},
   data: new SlashCommandBuilder()
     .setName("github")
     .setDescription("Show the implementation progress of the watched GitHub project.")

@@ -18,7 +18,7 @@
  *      claims a percentage.
  */
 import { describe, expect, it, vi } from "vitest";
-import type { ChatInputCommandInteraction } from "discord.js";
+import { GuildMember, type ChatInputCommandInteraction } from "discord.js";
 
 import type {
   GitHubClient,
@@ -665,4 +665,101 @@ describe("/github interaction acknowledgement", () => {
       ).resolves.toBeUndefined();
     },
   );
+});
+
+/**
+ * The command's permission surface. `/github status` and `/github history` only read
+ * stored snapshots, so any member may run them; `/github refresh` writes a snapshot and
+ * can post to the report channel, so it asks for `server.settings` itself. Declaring
+ * `core.use` at the command level — what the command used to do — quietly turned the two
+ * read-only subcommands into staff-only commands, because `core.use` is only granted
+ * through a role bound to a permission class.
+ */
+describe("/github permission surface", () => {
+  /** A `GuildMember` that passes the handler's `instanceof` check but needs no client. */
+  function member(id = "1533346203268419659"): GuildMember {
+    const stub = { id } as unknown as GuildMember;
+    // `id` afterwards would hit GuildMember's getter-only accessor instead.
+    Object.setPrototypeOf(stub, GuildMember.prototype);
+    return stub;
+  }
+
+  /** An interaction that records the payloads handed to `editReply`. */
+  function interactionFor(
+    subcommand: string,
+    guildMember: GuildMember | null,
+  ): { interaction: ChatInputCommandInteraction; replies: unknown[] } {
+    const replies: unknown[] = [];
+    const stub = {
+      options: {
+        getSubcommand: () => subcommand,
+        getInteger: () => null,
+      },
+      member: guildMember,
+      replied: false,
+      deferred: false,
+      deferReply: () => {
+        stub.deferred = true;
+        return Promise.resolve();
+      },
+      editReply: (payload: unknown) => {
+        replies.push(payload);
+        return Promise.resolve();
+      },
+    };
+    return { interaction: stub as unknown as ChatInputCommandInteraction, replies };
+  }
+
+  it("declares no command-level permission, so status and history stay open to members", () => {
+    expect(githubCommand.permissions).toEqual({});
+  });
+
+  it("refuses `refresh` without `server.settings` and leaves the monitor untouched", async () => {
+    const refresh = vi.fn();
+    const context = {
+      repositoryMonitor: {
+        fullName: "boykopovar/AnyPS5",
+        history: () => Promise.resolve<SnapshotRecord[]>([]),
+        refresh,
+      },
+      authorization: { can: () => Promise.resolve(false) },
+    } as unknown as CommandExecutionContext;
+
+    const { interaction, replies } = interactionFor("refresh", member());
+
+    await githubCommand.execute(interaction, context);
+
+    expect(refresh).not.toHaveBeenCalled();
+    expect(JSON.stringify(replies)).toContain("server.settings");
+  });
+
+  it("takes the snapshot when the member holds `server.settings`", async () => {
+    const refresh = vi.fn(() =>
+      Promise.resolve({
+        baseline: false,
+        announced: 2,
+        librariesPercent: 57,
+        shaderPercent: 63,
+        failures: [],
+      }),
+    );
+    const can = vi.fn(() => Promise.resolve(true));
+    const context = {
+      repositoryMonitor: {
+        fullName: "boykopovar/AnyPS5",
+        history: () => Promise.resolve<SnapshotRecord[]>([]),
+        refresh,
+      },
+      authorization: { can },
+    } as unknown as CommandExecutionContext;
+
+    const author = member();
+    const { interaction, replies } = interactionFor("refresh", author);
+
+    await githubCommand.execute(interaction, context);
+
+    expect(can).toHaveBeenCalledWith(author, { custom: ["server.settings"] }, "github.refresh");
+    expect(refresh).toHaveBeenCalledOnce();
+    expect(JSON.stringify(replies)).toContain("refreshed");
+  });
 });
