@@ -15,6 +15,7 @@ import { GuildMember, SlashCommandBuilder, type ChatInputCommandInteraction } fr
 import { defineSlashCommand } from "../define.js";
 import type { CommandExecutionContext } from "../context.js";
 import { brandedEmbed, errorEmbed } from "../../utils/presenters.js";
+import { AppError, toError } from "../../utils/errors.js";
 import { buildReportContent } from "../../modules/repository/repository-report.content.js";
 import type { RepositoryMonitorService } from "../../modules/repository/repository.service.js";
 import type { SnapshotRecord } from "../../modules/repository/repository.types.js";
@@ -195,7 +196,17 @@ async function handleRefresh(
     return;
   }
 
-  const report = await monitor.refresh();
+  const report = await monitor.refresh().catch((error: unknown) => {
+    // The generic handler would answer "contact the team", which tells an operator
+    // nothing and leaves a broken deployment looking like a bot bug. Reading the
+    // snapshot touches the database and three HTTP sources, so the failure is almost
+    // always one of two things an operator can act on, and saying which costs nothing.
+    throw new AppError(`GitHub monitor could not record a snapshot: ${explainRefreshFailure(error)}`, {
+      code: "REPOSITORY_REFRESH_FAILED",
+      expected: true,
+      cause: error,
+    });
+  });
   const lines = [
     report.baseline
       ? "Baseline recorded: this is the first snapshot, so history is not announced."
@@ -214,6 +225,36 @@ async function handleRefresh(
 /** Renders a stored percentage, keeping "no data" distinct from 0%. */
 function percentCell(value: number | null): string {
   return value === null ? "—" : `${value}%`;
+}
+
+/**
+ * Turns a refresh failure into something the person who ran `/github` can act on.
+ *
+ * The two causes worth naming are the ones the code can tell apart from the outside:
+ * a database that has not been migrated (the tables are missing), and a schema the
+ * running client does not match. Everything else is reported by its message, which
+ * is still more useful than "contact the team", and is truncated because an embed
+ * description is not a log file.
+ *
+ * Nothing here can leak a secret: the errors that reach this point are Prisma and
+ * HTTP failures, and the GitHub token never appears in their messages.
+ */
+export function explainRefreshFailure(error: unknown): string {
+  const message = toError(error).message;
+
+  // Checked before the table rule: a Prisma "column does not exist" message also
+  // contains "does not exist in the current database", which would otherwise be
+  // reported as a missing migration when the real fault is a stale client.
+  if (/column .* does not exist|does not match the schema/i.test(message)) {
+    return "the database schema and the built client disagree — rerun `npx prisma migrate deploy` and `npm run build`";
+  }
+  if (/does not exist in the current database|relation .* does not exist/i.test(message)) {
+    return "the database is missing the V9 tables — run `npx prisma migrate deploy` on the host";
+  }
+  if (/can't reach database server|ECONNREFUSED|ENOTFOUND/i.test(message)) {
+    return "the database is unreachable — check `DATABASE_URL` on the host";
+  }
+  return message.length > 300 ? `${message.slice(0, 297)}...` : message;
 }
 
 /**

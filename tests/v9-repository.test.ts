@@ -28,6 +28,7 @@ import type { ProgressEvent } from "../../src/services/anyps5/repository.types.j
 import type { SnapshotRecord } from "../../src/modules/repository/repository.types.js";
 import { testLogger } from "../helpers/logger.js";
 import { memoryMonitorRepository } from "../helpers/repository.js";
+import { explainRefreshFailure } from "../../src/commands/utility/github.js";
 
 const NOW = new Date("2026-10-23T12:00:00.000Z");
 
@@ -560,4 +561,44 @@ describe("conditional requests", () => {
     expect(result.cache).toEqual({ commitsEtag: "etag-commits", pullRequestsEtag: "etag-pulls" });
   });
 });
+
+/**
+ * `/github refresh` used to answer "contact the team" for a deployment problem,
+ * which is the one thing an operator cannot act on. These are the two causes a
+ * deployment actually hits, plus the rule that anything else is still described.
+ */
+describe("explainRefreshFailure", () => {
+  it("names the missing migration when the tables are absent", () => {
+    const message = explainRefreshFailure(
+      new Error('The table `public.repository_snapshots` does not exist in the current database.'),
+    );
+    expect(message).toContain("prisma migrate deploy");
+    expect(message).toContain("V9 tables");
+  });
+
+  it("names the schema/client mismatch", () => {
+    const message = explainRefreshFailure(
+      new Error("The column `monitored_repositories.id` does not exist in the current database."),
+    );
+    expect(message).toContain("migrate deploy");
+    expect(message).toContain("build");
+  });
+
+  it("names an unreachable database", () => {
+    expect(explainRefreshFailure(new Error("Can't reach database server at localhost:5432"))).toContain(
+      "DATABASE_URL",
+    );
+  });
+
+  it("falls back to the error message, truncated to fit an embed", () => {
+    const message = explainRefreshFailure(new Error(`something odd: ${"x".repeat(500)}`));
+    expect(message).toHaveLength(300);
+    expect(message.endsWith("...")).toBe(true);
+  });
+
+  it("accepts a non-Error throw without losing the text", () => {
+    expect(explainRefreshFailure("boom")).toBe("boom");
+  });
+});
+
 
