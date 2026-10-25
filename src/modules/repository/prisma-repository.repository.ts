@@ -13,6 +13,7 @@ import type {
   RepositoryCommit,
   RepositoryPullRequest,
 } from "../../services/anyps5/repository.types.js";
+import type { AnyPs5Progress } from "../../services/anyps5/progress.js";
 import type {
   MonitorRecord,
   PendingEvent,
@@ -376,6 +377,7 @@ function toSnapshot(row: {
   openIssues: number;
   commitCount: number;
   pullCount: number;
+  progress: unknown;
   failures: unknown;
 }): SnapshotRecord {
   return {
@@ -393,10 +395,34 @@ function toSnapshot(row: {
       shadersTotal: row.shadersTotal,
     },
     progressCommit: row.progressCommit,
+    // The stored document is the only copy of this snapshot's per-library table,
+    // so it is passed through as parsed rather than flattened into the row's
+    // columns: the columns hold the headline percentages, this holds the detail.
+    progress: toProgress(row.progress),
     commitCount: row.commitCount,
     pullCount: row.pullCount,
     failures: Array.isArray(row.failures)
       ? row.failures.filter((item): item is string => typeof item === "string")
       : [],
   };
+}
+
+/**
+ * @returns the stored `progress.json` as a document, or `null` when the column is
+ * empty or was written by an older shape.
+ *
+ * Only the shape the report reads is checked, not the whole document: the
+ * document belongs to the upstream project, and a field it gains or renames
+ * should degrade one panel, not throw on every `/github`.
+ */
+function toProgress(value: unknown): AnyPs5Progress | null {
+  if (value === null || typeof value !== "object") {
+    return null;
+  }
+  const document = value as Partial<AnyPs5Progress>;
+  const libraries = document.libraries;
+  if (libraries === undefined || !Array.isArray(libraries.groups)) {
+    return null;
+  }
+  return document as AnyPs5Progress;
 }

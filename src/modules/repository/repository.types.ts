@@ -32,6 +32,15 @@ export interface SnapshotRecord {
   readonly capturedAt: Date;
   readonly state: ReportedState;
   readonly progressCommit: string | null;
+  /**
+   * The full `progress.json` this snapshot recorded, per-library table included.
+   *
+   * `null` when the reading could not fetch it. Kept because a per-library trend
+   * (`/github libraries`, `/github why`) needs the table behind the headline
+   * percentage, and re-fetching a past document is not possible: the project
+   * publishes only its current state.
+   */
+  readonly progress: AnyPs5Progress | null;
   readonly commitCount: number;
   readonly pullCount: number;
   readonly failures: readonly string[];

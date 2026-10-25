@@ -11,7 +11,13 @@
  *   keep;
  * - `repository.events.ts` — the pure judgement about what counts as news;
  * - `repository.tasks.ts` — the recurring scheduler task that runs it hourly;
- * - `discord-repository-report.ts` — the one Discord operation it needs.
+ * - `discord-repository-report.ts` — the one Discord operation it needs;
+ * - `repository-analytics.ts` — the series statistics behind `/github`;
+ * - `repository-chart.ts` — the text charts those statistics are drawn with;
+ * - `github-view.ts` — `/github` itself, as embeds and components, without
+ *   discord.js;
+ * - `github-components.ts` — the one conversion of that view into discord.js
+ *   builders, shared by the slash command and the component handler.
  */
 export {
   HISTORY_WINDOW,
@@ -31,6 +37,44 @@ export { deriveEvents, formatCount, truncate } from "./repository.events.js";
 export { buildReportContent, type ReportContent } from "./repository-report.content.js";
 export { DiscordRepositoryReport, renderEmbed } from "./discord-repository-report.js";
 export { PrismaRepositoryMonitorRepository } from "./prisma-repository.repository.js";
+export {
+  buildGithubView,
+  chunk,
+  formatSpan,
+  isGithubComponent,
+  PANEL_IDS,
+  panelCustomId,
+  parsePanelCustomId,
+  relativeTime,
+  absoluteTime,
+  sparklineStrip,
+  type ComponentButton,
+  type ComponentRows,
+  type ComponentSelect,
+  type EmbedField,
+  type EmbedPayload,
+  type GithubContext,
+  type GithubPanel,
+  type GithubView,
+  type PanelRequest,
+} from "./github-view.js";
+export {
+  analyzeLibraries,
+  decompose,
+  implementationPoints,
+  lastComparableIndex,
+  readImplementation,
+  readLibraries,
+  round2,
+  summarize,
+  type Decomposition,
+  type ImplementationSeries,
+  type LibraryAnalysis,
+  type LibraryReading,
+  type SeriesPoint,
+  type TrendSummary,
+} from "./repository-analytics.js";
+export { renderView, toComponents, toEmbed, type ReplyPayload } from "./github-components.js";
 export type {
   MonitorRecord,
   PendingEvent,

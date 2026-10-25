@@ -88,6 +88,7 @@ export function memoryMonitorRepository(): MemoryMonitorRepository {
     capturedAt: input.capturedAt,
     state: input.state,
     progressCommit: input.progressCommit,
+    progress: input.progress,
     commitCount: input.commitCount,
     pullCount: input.pullCount,
     failures: input.failures,

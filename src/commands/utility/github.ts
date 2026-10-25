@@ -1,45 +1,103 @@
 /**
  * `/github` — the watched repository's implementation statistics.
  *
- *   /github status  — the latest snapshot, with the trend since the first one kept
- *   /github history — the recorded snapshots, oldest first (12 by default, 25 at most)
- *   /github refresh — take a snapshot now instead of waiting for the hourly task
+ *   /github                    — the overview, with buttons for the other panels
+ *   /github libraries          — every library, and how each one moved
+ *   /github timeline           — the last readings, newest first
+ *   /github graph              — the trend drawn as a text chart
+ *   /github why                — why the share moved: work, or new discoveries
+ *   /github history [limit]    — the recorded snapshots, oldest first (12 by default,
+ *                                25 at most)
+ *   /github refresh            — take a snapshot now instead of waiting for the hourly
+ *                                task
  *
- * Every number shown comes from the project's own published `progress.json`, stored
- * verbatim by the monitor; this command only formats what is already in the
- * database, so it works with no network access and never disagrees with the
- * hourly report.
+ * Every number shown is read from the project's own published `progress.json`,
+ * stored verbatim by the monitor; this command only formats what is already in
+ * the database, so it works with no network access, never disagrees with the
+ * hourly report, and cannot recompute a percentage differently from the project.
+ *
+ * The rendering lives in `modules/repository/github-view.ts`, which returns plain
+ * data. This file is the adapter: fetch the history, hand it over, and convert the
+ * result into discord.js builders.
  */
 import {
   GuildMember,
   MessageFlags,
   SlashCommandBuilder,
   type ChatInputCommandInteraction,
+  type SlashCommandSubcommandBuilder,
 } from "discord.js";
 
 import { defineSlashCommand } from "../define.js";
 import type { CommandExecutionContext } from "../context.js";
 import { brandedEmbed, errorEmbed } from "../../utils/presenters.js";
 import { AppError, toError } from "../../utils/errors.js";
-import { buildReportContent } from "../../modules/repository/repository-report.content.js";
+import {
+  buildGithubView,
+  type GithubContext,
+  type GithubPanel,
+} from "../../modules/repository/github-view.js";
+import { renderView, type ReplyPayload } from "../../modules/repository/github-components.js";
+import type { ChartStyle } from "../../modules/repository/repository-chart.js";
 import type { RepositoryMonitorService } from "../../modules/repository/repository.service.js";
-import type { SnapshotRecord } from "../../modules/repository/repository.types.js";
 
 /**
- * Rows `/github history` prints at most, and the window `/github status` trends
- * against. The monitor records one snapshot an hour, so 25 is "a day of history plus
- * one" rather than the whole archive — an embed that grows without bound is a message
- * Discord eventually refuses.
+ * Snapshots read per render.
+ *
+ * The storage window, not a display limit: the trend fields and the decomposition
+ * want as much history as the monitor keeps, and each panel trims what it draws.
+ */
+const HISTORY_ROWS = 72;
+
+/**
+ * Rows `/github history` prints at most. The monitor records one snapshot an hour, so
+ * 25 is "a day of history plus one" rather than the whole archive — an embed that grows
+ * without bound is a message Discord eventually refuses. The window above is larger on
+ * purpose: reading more history is what lets a trend see past the rows it prints.
  */
 const HISTORY_LIMIT_MAX = 25;
+
+/** Columns the graph draws: one per snapshot, at a width that fits a phone. */
+const GRAPH_WIDTH = 24;
+
+/** Embeds Discord accepts in one message. */
+const MAX_EMBEDS = 10;
+
+/** Panels that are their own subcommand, and the option that pins one. */
+const PANEL_CHOICES: readonly { readonly name: string; readonly value: GithubPanel }[] = [
+  { name: "overview", value: "overview" },
+  { name: "libraries", value: "libraries" },
+  { name: "timeline", value: "timeline" },
+  { name: "graph", value: "graph" },
+  { name: "why", value: "why" },
+];
+
+/**
+ * @returns `style` added to `sub`, typed as the two chart styles readers pick.
+ *
+ * `bars` draws columns against a labelled 0–100% scale, so the distance to done is
+ * honest; `line` shapes blocks against the window's own range, so a slow climb stays
+ * visible. There is no free-form width option: the width is how much history fits.
+ */
+function withStyle(sub: SlashCommandSubcommandBuilder): SlashCommandSubcommandBuilder {
+  return sub.addStringOption((option) =>
+    option
+      .setName("style")
+      .setDescription("How to draw the trend chart (default: line).")
+      .addChoices(
+        { name: "bars · columns on a labelled scale", value: "bars" },
+        { name: "line · columns scaled to the window", value: "line" },
+      ),
+  );
+}
 
 export default defineSlashCommand({
   meta: {
     name: "github",
     description: "Show the implementation progress of the watched GitHub project.",
     category: "utility",
-    usage: "/github status | history [limit] | refresh",
-    examples: ["/github status", "/github history limit:12"],
+    usage: "/github [overview|libraries|timeline|graph|why|history|refresh]",
+    examples: ["/github", "/github graph style:bars", "/github why", "/github history limit:12"],
   },
   // `status` and `history` only read stored snapshots, so the command declares no
   // permission of its own: they stay open to every member, the way `/ticket open` is.
@@ -51,12 +109,34 @@ export default defineSlashCommand({
     .setName("github")
     .setDescription("Show the implementation progress of the watched GitHub project.")
     .addSubcommand((sub) =>
-      sub.setName("status").setDescription("The latest snapshot and its trend."),
+      withStyle(
+        sub
+          .setName("overview")
+          .setDescription("Both sections, the pace and the library breakdown."),
+      ),
+    )
+    .addSubcommand((sub) =>
+      withStyle(sub.setName("libraries").setDescription("Every library, and how each one moved.")),
+    )
+    .addSubcommand((sub) =>
+      sub.setName("timeline").setDescription("The last recorded readings, newest first."),
+    )
+    .addSubcommand((sub) =>
+      withStyle(
+        sub.setName("graph").setDescription("The implementation trend drawn as a text chart."),
+      ),
+    )
+    .addSubcommand((sub) =>
+      sub
+        .setName("why")
+        .setDescription(
+          "Explain why the library share moved — work, or newly discovered functions.",
+        ),
     )
     .addSubcommand((sub) =>
       sub
         .setName("history")
-        .setDescription("The recorded snapshots, oldest first.")
+        .setDescription("The raw stored snapshots, oldest first.")
         .addIntegerOption((option) =>
           option
             .setName("limit")
@@ -86,78 +166,93 @@ export default defineSlashCommand({
       return;
     }
 
-    switch (interaction.options.getSubcommand()) {
-      case "status":
-        await handleStatus(interaction, monitor);
-        return;
-      case "history":
-        await handleHistory(interaction, monitor);
-        return;
-      case "refresh":
-        await handleRefresh(interaction, context, monitor);
-        return;
-      default:
-        await interaction.editReply({
-          embeds: [errorEmbed("GitHub monitor", "Unknown subcommand.")],
-        });
+    const subcommand = interaction.options.getSubcommand();
+    if (subcommand === "refresh") {
+      await handleRefresh(interaction, context, monitor);
+      return;
     }
+    if (subcommand === "history") {
+      await handleHistory(interaction, monitor);
+      return;
+    }
+
+    // Anything else is a panel; an unknown one falls back to the overview, which is
+    // also what a bare `/github` shows without needing a default subcommand.
+    const panel = PANEL_CHOICES.find((choice) => choice.value === subcommand)?.value ?? "overview";
+    await handlePanel(interaction, monitor, panel);
   },
 });
 
-async function handleStatus(
+/**
+ * Renders one panel and replies with it.
+ *
+ * The whole history is read at once and handed to the view, which decides what each
+ * panel needs: the overview wants the latest two readings, the graph wants the
+ * window, `why` wants the last comparable pair. Fetching per panel would put that
+ * choice in two places and let them drift.
+ */
+async function handlePanel(
   interaction: ChatInputCommandInteraction,
   monitor: RepositoryMonitorService,
+  panel: GithubPanel,
 ): Promise<void> {
-  const history = await monitor.history(HISTORY_LIMIT_MAX);
-  const latest = history.at(-1) ?? null;
-  if (latest === null) {
+  const style = readStyle(interaction);
+  const history = await monitor.history(HISTORY_ROWS);
+  const viewContext: GithubContext = {
+    fullName: monitor.fullName,
+    repoUrl: `https://github.com/${monitor.fullName}`,
+    history,
+    latest: history.at(-1) ?? null,
+    panel,
+    style,
+    width: GRAPH_WIDTH,
+    // Null, not thrown, when the interaction carries no user: the id only gates the
+    // panel buttons a reader may press, and a missing one should cost those buttons
+    // rather than the whole answer.
+    ownerId: interaction.user?.id ?? null,
+  };
+
+  // A fresh watch is answered by the view itself, with an embed that explains why it
+  // is empty instead of showing zeroes that would read as "nothing implemented".
+  await respond(interaction, renderView(buildGithubView(viewContext)));
+}
+
+/**
+ * @returns the chart style the caller asked for, defaulting to `line`.
+ *
+ * Defaulted rather than required because most readers arrive from the buttons, and a
+ * line-style chart reads better than bars at the width a phone gives a code block.
+ */
+function readStyle(interaction: ChatInputCommandInteraction): ChartStyle {
+  const choice = interaction.options.getString("style");
+  return choice === "bars" ? "bars" : "line";
+}
+
+/**
+ * Replies with a rendered view, or reports Discord's refusal honestly.
+ *
+ * The one failure worth expecting is size: a project with many libraries paginates
+ * into several embeds, and Discord caps a message at ten. That is a formatting
+ * problem, not a bug in the data, so it is named rather than shown as a generic
+ * error by the handler.
+ */
+async function respond(
+  interaction: ChatInputCommandInteraction,
+  view: ReplyPayload,
+): Promise<void> {
+  if (view.embeds.length > MAX_EMBEDS) {
     await interaction.editReply({
       embeds: [
-        brandedEmbed(`${monitor.fullName} — no snapshot yet`).setDescription(
-          "The monitor has not recorded a reading. Run `/github refresh`, or wait for the hourly task.",
+        errorEmbed(
+          "GitHub monitor",
+          `This panel needs ${view.embeds.length} embeds, and a message holds ${MAX_EMBEDS}. Try \`/github timeline\` or \`/github graph\` instead.`,
         ),
       ],
     });
     return;
   }
 
-  const previous = history.at(-2) ?? null;
-  // The stored snapshot is enough to render the numbers. Pull requests are stored
-  // per refresh too — reading them is what stops this view from describing the
-  // repository as having "0 open PRs (of the last 0)" — while the project's own
-  // description and the commits are left out rather than fabricated.
-  const pullRequests = await monitor.recentPullRequests();
-  const content = buildReportContent(
-    {
-      facts: {
-        fullName: monitor.fullName,
-        description: null,
-        defaultBranch: "main",
-        stars: latest.state.stars,
-        forks: latest.state.forks,
-        openIssues: latest.state.openIssues,
-        pushedAt: null,
-      },
-      progress: progressFromSnapshot(latest),
-      progressUnavailable: latest.failures.includes("progress")
-        ? "progress.json was unavailable for this snapshot"
-        : null,
-      progressCommit: latest.progressCommit,
-      commits: [],
-      pullRequests,
-      fetchedAt: latest.capturedAt,
-    },
-    previous,
-    [],
-    history,
-  );
-
-  const embed = brandedEmbed(content.title).setDescription(content.description);
-  for (const metric of content.metrics) {
-    embed.addFields({ name: metric.name, value: metric.value });
-  }
-  embed.setFooter({ text: `${content.footer} · snapshot ${latest.id.slice(0, 6)}` });
-  await interaction.editReply({ embeds: [embed] });
+  await interaction.editReply({ embeds: view.embeds, components: view.components });
 }
 
 /** `/github history` — one line per stored snapshot. */
@@ -198,6 +293,11 @@ async function handleHistory(
         }),
     ],
   });
+}
+
+/** @returns a percentage, keeping "no reading" distinct from 0%. */
+function percentCell(value: number | null): string {
+  return value === null ? "—" : `${value}%`;
 }
 
 /** `/github refresh` — a snapshot now, with the same announcement rules. */
@@ -255,11 +355,6 @@ async function handleRefresh(
   });
 }
 
-/** Renders a stored percentage, keeping "no data" distinct from 0%. */
-function percentCell(value: number | null): string {
-  return value === null ? "—" : `${value}%`;
-}
-
 /**
  * Turns a refresh failure into something the person who ran `/github` can act on.
  *
@@ -289,42 +384,3 @@ export function explainRefreshFailure(error: unknown): string {
   }
   return message.length > 300 ? `${message.slice(0, 297)}...` : message;
 }
-
-/**
- * Rebuilds just enough of a reading from a stored snapshot for the report builder.
- *
- * Deliberately partial: a snapshot keeps the section totals and percentages the
- * project published, not its per-library breakdown, so `/github status` shows the
- * headline numbers and leaves the library table to the hourly report, which has
- * the live reading. Nothing is recomputed to fill the gap.
- */
-function progressFromSnapshot(snapshot: SnapshotRecord) {
-  if (
-    snapshot.state.libraryPercent === null ||
-    snapshot.state.shaderPercent === null ||
-    snapshot.state.librariesDone === null ||
-    snapshot.state.librariesTotal === null ||
-    snapshot.state.shadersDone === null ||
-    snapshot.state.shadersTotal === null
-  ) {
-    return null;
-  }
-  return {
-    libraries: {
-      done: snapshot.state.librariesDone,
-      total: snapshot.state.librariesTotal,
-      percent: snapshot.state.libraryPercent,
-      groups: [],
-    },
-    shaders: {
-      done: snapshot.state.shadersDone,
-      total: snapshot.state.shadersTotal,
-      percent: snapshot.state.shaderPercent,
-      groups: [],
-      extra: [],
-    },
-  };
-}
-
-/** Re-exported so the history command's formatting is testable. */
-export { percentCell, progressFromSnapshot };

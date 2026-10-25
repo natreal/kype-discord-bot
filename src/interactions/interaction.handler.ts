@@ -74,6 +74,23 @@ import { TICKET_IDS } from "../modules/tickets/index.js";
 import type { TicketService } from "../modules/tickets/ticket.service.js";
 import type { ReminderService } from "../modules/reminders/index.js";
 import type { RepositoryMonitorService } from "../modules/repository/index.js";
+import {
+  buildGithubView,
+  isGithubComponent,
+  parsePanelCustomId,
+  renderView,
+} from "../modules/repository/index.js";
+
+/**
+ * Snapshots read per `/github` render, matching the command's own window.
+ *
+ * The storage window, not a display limit: each panel trims what it draws, and the
+ * trend and decomposition want as much history as the monitor keeps.
+ */
+const GITHUB_HISTORY_ROWS = 72;
+
+/** Embeds Discord accepts in one message. */
+const GITHUB_MAX_EMBEDS = 10;
 
 /**
  * Interactions that carry a guild member and can therefore be gated.
@@ -423,19 +440,18 @@ export class InteractionHandler {
   /**
    * Routes a button or select-menu interaction.
    *
-   * The only component family in this build is the ticket panel: custom IDs are
-   * namespaced as `ticket:<action>[:<argument>]` (see `TICKET_IDS`), so this
-   * method matches the prefix, hands the parsed argument to the matching
-   * handler, and silently ignores anything else.
+   * Custom IDs are namespaced: `ticket:<action>[:<argument>]` (see `TICKET_IDS`) for
+   * the ticket panel, and `github:<kind>:...` for the `/github` panels. Each family
+   * matches its prefix and hands off to its own handler; anything else is ignored,
+   * because a reply to an id nobody owns would be noise.
    */
   private async handleComponent(
     interaction: ButtonInteraction | StringSelectMenuInteraction,
   ): Promise<void> {
     const customId = interaction.customId;
 
-    // Ticket panels are the only components in this build, and they are user-facing
-    // actions: pause them with the rest of the bot. Unknown components stay ignored
-    // (a reply to an id nobody owns would be noise).
+    // Ticket panels are user-facing actions: pause them with the rest of the bot.
+    // Unknown components stay ignored (a reply to an id nobody owns would be noise).
     if (isTicketComponent(customId)) {
       const refusal = await this.maintenanceRefusal(interaction);
       if (refusal !== null) {
@@ -469,8 +485,77 @@ export class InteractionHandler {
       await this.handleTicketDelete(interaction as ButtonInteraction, id);
       return;
     }
+    if (isGithubComponent(customId)) {
+      await this.handleGithubPanel(interaction);
+      return;
+    }
 
     this.logger.debug("Component interaction received with no registered handler", { customId });
+  }
+
+  /**
+   * `github:panel:<panel>:<style>:<width>` and `github:select` — redraw a `/github`
+   * message on the panel that was clicked.
+   *
+   * The reply is edited in place rather than answered ephemerally: the panels are
+   * public project statistics, and a channel that accrues one reply per click would
+   * bury the conversation. The custom ID is the whole state — panel, chart style and
+   * width — so no session has to be tracked, and an old message keeps working after
+   * a restart.
+   */
+  private async handleGithubPanel(
+    interaction: ButtonInteraction | StringSelectMenuInteraction,
+  ): Promise<void> {
+    // A button names its panel in its own custom ID; the selector carries the panel
+    // in the chosen option's value, so both routes are parsed the same way.
+    const targetId = interaction.isStringSelectMenu()
+      ? (interaction.values[0] ?? "")
+      : interaction.customId;
+    const request = parsePanelCustomId(targetId);
+
+    const monitor = this.deps.repositoryMonitor;
+    if (!monitor) {
+      await this.safeReply(interaction, "The repository monitor is not running in this process.");
+      return;
+    }
+    if (request === null) {
+      // A stale message from an older build: answering "out of date" is honest, and
+      // silently ignoring the click would look like a broken button.
+      await this.safeReply(interaction, "This panel is out of date. Run `/github` again.");
+      return;
+    }
+
+    await interaction.deferUpdate();
+    try {
+      const history = await monitor.history(GITHUB_HISTORY_ROWS);
+      const payload = renderView(
+        buildGithubView({
+          fullName: monitor.fullName,
+          repoUrl: `https://github.com/${monitor.fullName}`,
+          history,
+          latest: history.at(-1) ?? null,
+          panel: request.panel,
+          style: request.style,
+          width: request.width,
+          ownerId: interaction.user.id,
+        }),
+      );
+      if (payload.embeds.length > GITHUB_MAX_EMBEDS) {
+        // The click is already acknowledged, so this has to be a follow-up; the
+        // original panel stays on screen rather than being replaced by an error.
+        await this.safeReply(
+          interaction,
+          `That panel needs ${payload.embeds.length} embeds, and a message holds ${GITHUB_MAX_EMBEDS}.`,
+        );
+        return;
+      }
+      await interaction.editReply({ embeds: payload.embeds, components: payload.components });
+    } catch (error) {
+      this.logger.error("Failed to render a /github panel", error, {
+        customId: interaction.customId,
+      });
+      await this.safeReply(interaction, "That panel could not be loaded. Try `/github` again.");
+    }
   }
 
   /** Resolves the ticket service for a button, or replies "unavailable" and returns `null`. */

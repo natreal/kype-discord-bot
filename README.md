@@ -511,6 +511,7 @@ Useful in-Discord tooling:
 | `/settings reset`    | utility  | Return an area (or everything) to defaults (owner-only)   |
 | `/maintenance`       | utility  | Pause or resume commands, tickets and AI replies          |
 | `/reminder`          | utility  | Personal timers; bump-again reminders after a Disboard bump |
+| `/github`            | utility  | Watched repository: implementation progress and trends    |
 | `/stop`              | utility  | Shut the bot down gracefully (owner only)                  |
 | `/restart`           | utility  | Restart the bot through its supervisor (owner only)         |
 | `/leave`             | utility  | Make the bot leave this server (owner only)                 |
@@ -523,6 +524,44 @@ Useful in-Discord tooling:
 | `/admin invite`      | utility  | Pre-configured invite link for either permission profile  |
 | `/admin permissions` | utility  | Critical permissions missing in this server               |
 | `/admin deploy`      | utility  | Publish the commands per the configured scope, then verify |
+
+### GitHub progress
+
+`/github [overview|libraries|timeline|graph|why|history|refresh]` reports the
+implementation progress of the watched repository from stored snapshots. Every panel
+is also a row of buttons under the reply, so a reader can switch views without typing
+the command again; the buttons and the select carry the whole view in their custom ID,
+so a click renders exactly what the slash command would.
+
+| Subcommand  | Shows                                                                    |
+| ----------- | ------------------------------------------------------------------------ |
+| `overview`  | Share implemented, the change since the last comparable reading, trend    |
+| `libraries` | Every library, most incomplete first, with its own change                 |
+| `timeline`  | The last readings, newest first                                          |
+| `graph`     | The trend as a monospace text chart (`style: bars` or `line`)             |
+| `why`       | Why the share moved — implemented work, or newly discovered functions     |
+| `history`   | The raw stored snapshots (`limit`, 1–25)                                 |
+| `refresh`   | Take a snapshot now and announce what changed                            |
+
+The read-only panels (`overview`, `libraries`, `timeline`, `graph`, `why`, `history`)
+declare no permission of their own, so every member may run them; `refresh` writes a
+snapshot and can post to the report channel, so it asks for `server.settings`.
+
+Two rules keep the numbers honest:
+
+- **a missing reading is never zero.** A snapshot that failed to store a figure shows a
+  gap (`—`) and no chart column; it is skipped when choosing what to compare against,
+  rather than reported as a fall to 0%.
+- **a fall has two causes, and they are added up separately.** `decompose` splits the
+  change into the part caused by implemented work and the part caused by newly
+  discovered functions, so `/github why` can say *"it **fell** while **nothing was
+  lost** — 100% of the drop is newly discovered work"* instead of merely reporting a
+  drop. A share can fall while the implemented count only grows, because the
+  denominator grew faster.
+
+`style: bars` draws columns against a labelled 0–100% scale, so the distance to done is
+honest; `style: line` shapes the same columns against the window's own range, so a slow
+climb stays visible. The width of the chart is how much history fits.
 
 ### Maintenance mode
 

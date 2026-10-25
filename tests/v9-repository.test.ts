@@ -773,6 +773,7 @@ describe("/github interaction acknowledgement", () => {
       options: {
         getSubcommand: () => subcommand,
         getInteger: () => null,
+        getString: () => null,
       },
       member: null,
       replied: false,
@@ -790,7 +791,9 @@ describe("/github interaction acknowledgement", () => {
     } as unknown as ChatInputCommandInteraction;
   }
 
-  it.each(["status", "history", "refresh"])(
+  // `status` became the `overview` panel when `/github` gained its panels; the panels
+  // read the `style` option and defer the same way, so all of them are covered here.
+  it.each(["overview", "libraries", "timeline", "graph", "why", "history", "refresh"])(
     "acknowledges `/github %s` before replying",
     async (subcommand) => {
       await expect(
@@ -1051,7 +1054,12 @@ describe("/github status pull requests", () => {
     failures: [],
   };
 
-  it("shows the stored pull requests instead of claiming there are none", async () => {
+  it("claims nothing about pull requests the panels do not show", async () => {
+    // Upstream's `/github status` read `monitor.recentPullRequests()` so it could name
+    // the open ones. The panel that replaced it renders from stored snapshots only, so
+    // it must not claim a count either way: a stale "0 open PRs" is as wrong as a stale
+    // "2 open PRs", and nothing in this process asked GitHub. If pull requests come back
+    // to a panel, they come back through the snapshot the panel reads.
     const recentPullRequests = vi.fn(() => Promise.resolve([pull(1), pull(2), pull(3, "closed")]));
     const context = {
       repositoryMonitor: {
@@ -1062,7 +1070,7 @@ describe("/github status pull requests", () => {
     } as unknown as CommandExecutionContext;
     const replies: unknown[] = [];
     const interaction = {
-      options: { getSubcommand: () => "status", getInteger: () => null },
+      options: { getSubcommand: () => "overview", getInteger: () => null, getString: () => null },
       member: null,
       replied: false,
       deferred: false,
@@ -1076,12 +1084,9 @@ describe("/github status pull requests", () => {
     await githubCommand.execute(interaction, context);
 
     const payload = JSON.stringify(replies.at(-1));
-    expect(recentPullRequests).toHaveBeenCalledOnce();
-    expect(payload).toContain("2 open PRs");
-    expect(payload).not.toContain("0 open PRs");
-    // The open ones are named, without pinging their authors.
-    expect(payload).toContain("Open pull requests");
-    expect(payload).toContain("#1 Refactor #1");
-    expect(payload).not.toContain("#3 Refactor #3");
+    // The overview renders, from the stored snapshot alone.
+    expect(payload).toContain("57.00%");
+    expect(payload).not.toMatch(/open PRs|pull request/i);
+    expect(recentPullRequests).not.toHaveBeenCalled();
   });
 });
