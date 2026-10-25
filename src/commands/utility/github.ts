@@ -60,9 +60,6 @@ const HISTORY_LIMIT_MAX = 25;
 /** Columns the graph draws: one per snapshot, at a width that fits a phone. */
 const GRAPH_WIDTH = 24;
 
-/** Embeds Discord accepts in one message. */
-const MAX_EMBEDS = 10;
-
 /** Panels that are their own subcommand, and the option that pins one. */
 const PANEL_CHOICES: readonly { readonly name: string; readonly value: GithubPanel }[] = [
   { name: "overview", value: "overview" },
@@ -154,6 +151,10 @@ export default defineSlashCommand({
     // the database and three HTTP sources, and `status`/`history` read the database,
     // so the answer has to be deferred first: without it `editReply` throws
     // `InteractionNotReplied` and the user is told the application did not respond.
+    //
+    // Deliberately *not* deferred as Components V2: `refresh`, `history` and the error
+    // paths reply with an embed, and a V2 message cannot carry one. Only the panel path
+    // sets the flag, on the edit that replaces this deferral.
     await interaction.deferReply({ flags: MessageFlags.Ephemeral });
 
     const monitor = context.repositoryMonitor;
@@ -229,30 +230,21 @@ function readStyle(interaction: ChatInputCommandInteraction): ChartStyle {
 }
 
 /**
- * Replies with a rendered view, or reports Discord's refusal honestly.
+ * Replies with a rendered view.
  *
- * The one failure worth expecting is size: a project with many libraries paginates
- * into several embeds, and Discord caps a message at ten. That is a formatting
- * problem, not a bug in the data, so it is named rather than shown as a generic
- * error by the handler.
+ * A Components V2 message holds forty components, and one panel is a container of
+ * text blocks plus two rows, so the old "too many embeds" ceiling is gone: the viewer
+ * no longer has to be told to pick a shorter panel. `renderView` refuses a text block
+ * over Discord's limit rather than sending a payload that would be rejected whole.
  */
 async function respond(
   interaction: ChatInputCommandInteraction,
   view: ReplyPayload,
 ): Promise<void> {
-  if (view.embeds.length > MAX_EMBEDS) {
-    await interaction.editReply({
-      embeds: [
-        errorEmbed(
-          "GitHub monitor",
-          `This panel needs ${view.embeds.length} embeds, and a message holds ${MAX_EMBEDS}. Try \`/github timeline\` or \`/github graph\` instead.`,
-        ),
-      ],
-    });
-    return;
-  }
-
-  await interaction.editReply({ embeds: view.embeds, components: view.components });
+  await interaction.editReply({
+    components: view.components,
+    flags: MessageFlags.IsComponentsV2,
+  });
 }
 
 /** `/github history` — one line per stored snapshot. */

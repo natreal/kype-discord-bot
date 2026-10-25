@@ -44,32 +44,53 @@ import {
 import { formatCount } from "./repository.events.js";
 
 /** Characters Discord allows in one embed field before it truncates. */
-export const MAX_FIELD = 1_024;
-/** Characters allowed in one field title. */
+/**
+ * The most text one block of a reply may hold.
+ *
+ * Raised from 1024 when the panels moved to Components V2: an embed field capped at
+ * 1024 characters, so the library table had to be split into 1024-character pages and
+ * the overview had to drop sections past its twenty-fifth field. A text block has no
+ * such grid, so the table now pages on its own size instead of the embed's.
+ */
+/**
+ * The most text one block of a reply may hold.
+ *
+ * Raised from 1024 when the panels moved to Components V2: an embed field capped at
+ * 1024 characters, so the library table had to be split into 1024-character pages and
+ * the overview had to drop sections past its twenty-fifth field. A text block has no
+ * such grid, so the table pages on its own size and the overview keeps every section.
+ */
+export const MAX_FIELD = 4_000;
+/** Characters allowed in one section heading, matching an embed field's name. */
 export const MAX_FIELD_NAME = 256;
-/** Characters allowed in an embed description. */
+/** Characters allowed in a panel's introduction. */
 export const MAX_DESCRIPTION = 4_096;
-/** Fields one embed may hold. */
-export const MAX_FIELDS = 25;
 
 /** The panels `/github` can show, and the buttons that switch between them. */
 export type GithubPanel = "overview" | "libraries" | "timeline" | "graph" | "why";
 
-/** A field of an embed, as data. */
-export interface EmbedField {
-  readonly name: string;
-  readonly value: string;
-  readonly inline?: boolean;
+/** A section of a panel: a heading, then its text. */
+export interface ViewSection {
+  readonly heading: string;
+  readonly text: string;
 }
 
-/** One rendered embed, as data. */
-export interface EmbedPayload {
+/**
+ * One rendered block of a reply, as data.
+ *
+ * Shaped like a Components V2 container and not like an embed: an embed gave every
+ * figure a 1024-character field inside a 25-field grid, which is what forced the
+ * library table into pages and let the overview drop its tail. A block is an accent
+ * colour, an introduction, and as many sections as the panel actually has.
+ */
+export interface ViewBlock {
   readonly title: string;
   readonly url: string | null;
+  /** The introduction: when the snapshot was taken and what it describes. */
   readonly description: string;
   /** 0 to 0xffffff; picked from the panel's own palette. */
   readonly color: number;
-  readonly fields: readonly EmbedField[];
+  readonly sections: readonly ViewSection[];
   readonly footer: string;
 }
 
@@ -112,7 +133,8 @@ export interface ComponentRows {
 
 /** One complete `/github` render. */
 export interface GithubView {
-  readonly embeds: readonly EmbedPayload[];
+  /** One block per page; almost always a single block. */
+  readonly blocks: readonly ViewBlock[];
   readonly components: ComponentRows;
 }
 
@@ -147,32 +169,32 @@ const PALETTE = {
 /**
  * Builds one `/github` render.
  *
- * @returns the embeds and components. A fresh watch — no snapshots at all — is a
+ * @returns the blocks and components. A fresh watch — no snapshots at all — is a
  * valid state with its own copy, not an error: there is simply nothing recorded
- * yet, and saying so is more useful than an empty embed.
+ * yet, and saying so is more useful than an empty block.
  */
 export function buildGithubView(context: GithubContext): GithubView {
   if (context.latest === null) {
     return {
-      embeds: [freshWatchEmbed(context)],
+      blocks: [freshWatchBlock(context)],
       components: componentRows("overview", context.style, false),
     };
   }
   const bodies = panelBody(context);
   return {
-    // Every embed carries the footer, so a multi-embed table reads the same on its
+    // Every block carries the footer, so a multi-block table reads the same on its
     // last page as the overview does.
-    embeds: bodies.map((body) => ({ ...body, footer: footerFor(context) })),
+    blocks: bodies.map((body) => ({ ...body, footer: footerFor(context) })),
     components: componentRows(context.panel, context.style, true),
   };
 }
 
 /**
- * @returns one embed body per panel page. A list rather than a single embed
- * because a project with many libraries needs more than one: the table continues
- * onto further embeds instead of being truncated at twenty-five fields.
+ * @returns one block per panel page. A list rather than a single block because a
+ * project with many libraries needs more than one: the table continues onto further
+ * blocks instead of being truncated.
  */
-function panelBody(context: GithubContext): Omit<EmbedPayload, "footer">[] {
+function panelBody(context: GithubContext): Omit<ViewBlock, "footer">[] {
   switch (context.panel) {
     case "libraries":
       return librariesPanel(context);
@@ -298,7 +320,7 @@ function body(lines: readonly string[], limit = MAX_FIELD): string {
  * Field order is fixed — headline, then counters, then composition — so an
  * operator reading the channel hourly finds the same numbers in the same place.
  */
-function overviewPanel(context: GithubContext): Omit<EmbedPayload, "footer"> {
+function overviewPanel(context: GithubContext): Omit<ViewBlock, "footer"> {
   const snapshot = context.latest as SnapshotRecord;
   const reading = latestReading(context);
   const previous = previousReading(context);
@@ -309,23 +331,24 @@ function overviewPanel(context: GithubContext): Omit<EmbedPayload, "footer"> {
     ],
     MAX_DESCRIPTION,
   );
+  const title = `${context.fullName} — implementation progress`;
 
   if (reading === null || reading.libraries === null || reading.shaders === null) {
     return {
-      title: `${context.fullName} — implementation progress`,
+      title,
       url: context.repoUrl,
       description,
       color: PALETTE.flat,
-      fields: [
+      sections: [
         {
-          name: "⚠️ No implementation numbers in this snapshot",
-          value: body([
+          heading: "⚠️ No implementation numbers in this snapshot",
+          text: body([
             "The project's `progress.json` could not be read when this snapshot was taken,",
             "so this reading carries no percentage. That is *unknown*, not zero: nothing",
             "was lost, and the earlier readings are still on the next snapshots.",
           ]),
         },
-        communityField(context),
+        communitySection(context),
       ],
     };
   }
@@ -339,40 +362,45 @@ function overviewPanel(context: GithubContext): Omit<EmbedPayload, "footer"> {
       ? null
       : decompose(previous.libraries, reading.libraries);
 
-  const fields: EmbedField[] = [
-    libraryField(reading.libraries, previous?.libraries ?? null),
-    shaderField(reading.shaders, previous?.shaders ?? null),
-    communityField(context),
-    ...compositionFields(context),
-    ...trendFields(context),
+  const sections: ViewSection[] = [
+    librarySection(reading.libraries, previous?.libraries ?? null),
+    shaderSection(reading.shaders, previous?.shaders ?? null),
+    communitySection(context),
+    ...compositionSections(context),
+    ...trendSections(context),
   ];
 
   // The one figure people misread, given a line of its own: a falling share while
   // implemented functions rise can only come from the denominator growing.
   if (decomposition !== null && decomposition.change < 0) {
-    fields.push({
-      name: "🔎 The library share fell — the grid is not shrinking",
-      value: body([
+    sections.push({
+      heading: "🔎 The library share fell — the grid is not shrinking",
+      text: body([
         footerDiscovered(decomposition),
         "`/github why` explains it, and `/github libraries` names the libraries involved.",
       ]),
     });
   }
 
+  // No slice: a text block holds every section, where an embed stopped at twenty-five
+  // fields and dropped the rest without saying so.
   return {
-    title: `${context.fullName} — implementation progress`,
+    title,
     url: context.repoUrl,
     description,
     color: colourFor(libraryChange),
-    fields: fields.slice(0, MAX_FIELDS),
+    sections,
   };
 }
 
 /** @returns the libraries headline: gauge, counts, and what moved since before. */
-function libraryField(now: ImplementationSeries, before: ImplementationSeries | null): EmbedField {
+function librarySection(
+  now: ImplementationSeries,
+  before: ImplementationSeries | null,
+): ViewSection {
   return {
-    name: `📚 System libraries — ${formatValue(now.percent, 2)}%`,
-    value: body([
+    heading: `📚 System libraries — ${formatValue(now.percent, 2)}%`,
+    text: body([
       gaugeLine(now),
       `\`${formatCount(now.done)}\` / \`${formatCount(now.total)}\` functions implemented`,
       before === null ? "▬ no earlier reading to compare" : movement(now.percent - before.percent),
@@ -384,10 +412,13 @@ function libraryField(now: ImplementationSeries, before: ImplementationSeries | 
 }
 
 /** @returns the shaders headline, shaped like the library one. */
-function shaderField(now: ImplementationSeries, before: ImplementationSeries | null): EmbedField {
+function shaderSection(
+  now: ImplementationSeries,
+  before: ImplementationSeries | null,
+): ViewSection {
   return {
-    name: `🎮 GPU shaders — ${formatValue(now.percent, 2)}%`,
-    value: body([
+    heading: `🎮 GPU shaders — ${formatValue(now.percent, 2)}%`,
+    text: body([
       gaugeLine(now),
       `\`${formatCount(now.done)}\` / \`${formatCount(now.total)}\` instructions translated`,
       before === null ? "▬ no earlier reading to compare" : movement(now.percent - before.percent),
@@ -399,13 +430,13 @@ function shaderField(now: ImplementationSeries, before: ImplementationSeries | n
 }
 
 /** @returns the repository counters that frame the percentages. */
-function communityField(context: GithubContext): EmbedField {
+function communitySection(context: GithubContext): ViewSection {
   const latest = context.latest as SnapshotRecord;
   const first = context.history[0] ?? latest;
   const stored = context.history.length;
   return {
-    name: "⭐ Community",
-    value: body([
+    heading: "⭐ Community",
+    text: body([
       `**${formatCount(latest.state.stars)}** stars · **${formatCount(latest.state.forks)}** forks`,
       `**${formatCount(latest.state.openIssues)}** open issues`,
       stored > 1
@@ -425,7 +456,7 @@ function describeCommit(snapshot: SnapshotRecord): string {
 }
 
 /** @returns how much of each section is finished, and which libraries are closest. */
-function compositionFields(context: GithubContext): EmbedField[] {
+function compositionSections(context: GithubContext): ViewSection[] {
   const latest = context.latest as SnapshotRecord;
   const libraries = readLibraries(latest);
   if (libraries.length === 0) {
@@ -433,8 +464,8 @@ function compositionFields(context: GithubContext): EmbedField[] {
     // empty panel that reads like a broken command.
     return [
       {
-        name: "🧩 Library breakdown",
-        value: "▬ this snapshot stored no per-library table. It appears from the next refresh.",
+        heading: "🧩 Library breakdown",
+        text: "▬ this snapshot stored no per-library table. It appears from the next refresh.",
       },
     ];
   }
@@ -449,8 +480,8 @@ function compositionFields(context: GithubContext): EmbedField[] {
 
   return [
     {
-      name: "🧩 Library breakdown",
-      value: body([
+      heading: "🧩 Library breakdown",
+      text: body([
         `**${complete.length}** of **${libraries.length}** libraries complete`,
         ...(unfinished.length === 0
           ? ["every analysed library is finished 🎉"]
@@ -464,7 +495,7 @@ function compositionFields(context: GithubContext): EmbedField[] {
 }
 
 /** @returns the pace fields: change over the window, pace, and a rough estimate. */
-function trendFields(context: GithubContext): EmbedField[] {
+function trendSections(context: GithubContext): ViewSection[] {
   const libraries = summarize(seriesFor(context, "libraries"));
   const shaders = summarize(seriesFor(context, "shaders"));
   const window = windowLabel(context);
@@ -481,10 +512,10 @@ function trendFields(context: GithubContext): EmbedField[] {
     lines.push(`    pace ${paceLabel(shaders)}`);
   }
 
-  const fields: EmbedField[] = [
-    { name: "📈 Trend", value: body(lines.length === 0 ? ["▬ no readings yet"] : lines) },
+  const fields: ViewSection[] = [
+    { heading: "📈 Trend", text: body(lines.length === 0 ? ["▬ no readings yet"] : lines) },
   ];
-  const estimate = estimateField(libraries);
+  const estimate = estimateSection(libraries);
   if (estimate !== null) {
     fields.push(estimate);
   }
@@ -521,7 +552,7 @@ function paceLabel(summary: TrendSummary): string {
  * project that keeps discovering functions pushes the finish line out as it
  * approaches it. Shown as a rough figure, never as a promise.
  */
-function estimateField(summary: TrendSummary | null): EmbedField | null {
+function estimateSection(summary: TrendSummary | null): ViewSection | null {
   if (summary === null || summary.slopePerDay === null || summary.slopePerDay <= 0) {
     return null;
   }
@@ -530,8 +561,8 @@ function estimateField(summary: TrendSummary | null): EmbedField | null {
     return null;
   }
   return {
-    name: "🧭 At this pace",
-    value: body([
+    heading: "🧭 At this pace",
+    text: body([
       `100% would arrive in **${formatSpan(remaining / summary.slopePerDay)}** at ${signed(summary.slopePerDay)} pp/day.`,
       "An extrapolation from the window above — discoveries move the finish line.",
     ]),
@@ -565,7 +596,7 @@ export function formatSpan(days: number): string {
  * Rows are one code lane per library (`name  gauge  12.34%`), so the numbers line
  * up in the monospaced run the way a table would.
  */
-function librariesPanel(context: GithubContext): Omit<EmbedPayload, "footer">[] {
+function librariesPanel(context: GithubContext): Omit<ViewBlock, "footer">[] {
   const snapshot = context.latest as SnapshotRecord;
   const libraries = readLibraries(snapshot);
   const previous = comparableLibraries(context);
@@ -579,11 +610,10 @@ function librariesPanel(context: GithubContext): Omit<EmbedPayload, "footer">[] 
         url,
         description: `Captured **${relativeTime(snapshot.capturedAt)}**.`,
         color: PALETTE.flat,
-        fields: [
+        sections: [
           {
-            name: "▬ No per-library table in this snapshot",
-            value:
-              "This snapshot stored no library data, or `progress.json` was unreadable when it was taken. The next successful refresh fills the table in.",
+            heading: "▬ No per-library table in this snapshot",
+            text: "This snapshot stored no library data, or `progress.json` was unreadable when it was taken. The next successful refresh fills the table in.",
           },
         ],
       },
@@ -634,10 +664,10 @@ function librariesPanel(context: GithubContext): Omit<EmbedPayload, "footer">[] 
         ? description
         : `Captured **${relativeTime(snapshot.capturedAt)}** · most incomplete first.`,
     color: PALETTE.idle,
-    fields: [
+    sections: [
       {
-        name: "Library · share · implemented / discovered · change",
-        value: page.map((row) => row.text).join("\n"),
+        heading: "Library · share · implemented / discovered · change",
+        text: page.map((row) => row.text).join("\n"),
       },
     ],
   }));
@@ -708,7 +738,7 @@ export function chunk<T>(items: readonly T[], size: number): T[][] {
  * `—`, never as `0%`, because those two are different facts and only one of them
  * is bad news.
  */
-function timelinePanel(context: GithubContext): Omit<EmbedPayload, "footer">[] {
+function timelinePanel(context: GithubContext): Omit<ViewBlock, "footer">[] {
   const history = trimmedHistory(context, 15);
   const summary = summarize(seriesFor(context, "libraries"));
 
@@ -745,27 +775,27 @@ function timelinePanel(context: GithubContext): Omit<EmbedPayload, "footer">[] {
       url: context.repoUrl,
       description,
       color: colourFor(summary?.change ?? null),
-      fields: [
+      sections: [
         {
-          name: "🕘 When · libraries · shaders · implemented step",
-          value: body(rows.reverse()),
+          heading: "🕘 When · libraries · shaders · implemented step",
+          text: body(rows.reverse()),
         },
-        ...(summary === null ? [] : [stepsField(summary)]),
+        ...(summary === null ? [] : [stepsSection(summary)]),
       ],
     },
   ];
 }
 
 /** @returns how often the reading went up, down or stayed put. */
-function stepsField(summary: TrendSummary): EmbedField {
+function stepsSection(summary: TrendSummary): ViewSection {
   const { up, down, flat } = summary.steps;
   const longest =
     summary.longestRun === null
       ? "▬ no run of changes yet"
       : `longest run: ${summary.longestRun.length} ${summary.longestRun.direction === "up" ? "▲ up" : "▼ down"}`;
   return {
-    name: "🔀 Steps",
-    value: body([
+    heading: "🔀 Steps",
+    text: body([
       `**${up}** up · **${down}** down · **${flat}** unchanged`,
       summary.improvingShare === null
         ? longest
@@ -785,7 +815,7 @@ function trimmedHistory(context: GithubContext, limit: number): readonly Snapsho
  * The chart is fenced so Discord renders it monospaced; the legend beneath is
  * plain text, so its numbers stay readable where a code block would scroll.
  */
-function graphPanel(context: GithubContext): Omit<EmbedPayload, "footer">[] {
+function graphPanel(context: GithubContext): Omit<ViewBlock, "footer">[] {
   const libraries = seriesFor(context, "libraries");
   const shaders = seriesFor(context, "shaders");
   const width = Math.max(8, Math.min(48, Math.trunc(context.width)));
@@ -800,17 +830,17 @@ function graphPanel(context: GithubContext): Omit<EmbedPayload, "footer">[] {
         url: context.repoUrl,
         description: "▬ no reading carries a percentage yet, so there is nothing to plot.",
         color: PALETTE.flat,
-        fields: [],
+        sections: [],
       },
     ];
   }
 
-  const fields: EmbedField[] = [];
+  const fields: ViewSection[] = [];
   if (libraryWindow.length > 0) {
-    fields.push(chartField("📚 System libraries", libraryWindow, context.style, 6));
+    fields.push(chartSection("📚 System libraries", libraryWindow, context.style, 6));
   }
   if (shaderWindow.length > 0) {
-    fields.push(chartField("🎮 GPU shaders", shaderWindow, context.style, 4));
+    fields.push(chartSection("🎮 GPU shaders", shaderWindow, context.style, 4));
   }
 
   const summary = summarize(libraryWindow);
@@ -831,18 +861,18 @@ function graphPanel(context: GithubContext): Omit<EmbedPayload, "footer">[] {
       url: context.repoUrl,
       description,
       color: colourFor(summary?.change ?? null),
-      fields: fields.slice(0, MAX_FIELDS),
+      sections: fields,
     },
   ];
 }
 
-/** @returns one series as a chart field plus a legend in plain text. */
-function chartField(
-  name: string,
+/** @returns one series as a chart section plus a legend in plain text. */
+function chartSection(
+  title: string,
   points: readonly SeriesPoint[],
   style: ChartStyle,
   rows: number,
-): EmbedField {
+): ViewSection {
   const values = points.map((point) => point.value);
   // `bars` starts at zero, the honest frame for "how far from done"; `line` spans
   // the window so a slow climb stays visible. `rows` is text rows either way:
@@ -871,8 +901,8 @@ function chartField(
       : `${span} · ${movement((last?.value ?? 0) - (first?.value ?? 0))} · low ${low} · high ${high}`;
 
   return {
-    name: clip(name, MAX_FIELD_NAME),
-    value: body([chart, legend]),
+    heading: clip(title, MAX_FIELD_NAME),
+    text: body([chart, legend]),
   };
 }
 
@@ -899,7 +929,7 @@ export function sparklineStrip(points: readonly SeriesPoint[], width: number): s
  * when the fall really was work being lost, or a recount of implemented functions,
  * it says that instead, and the two terms still add up to what was observed.
  */
-function whyPanel(context: GithubContext): Omit<EmbedPayload, "footer">[] {
+function whyPanel(context: GithubContext): Omit<ViewBlock, "footer">[] {
   const snapshot = context.latest as SnapshotRecord;
   const now = readImplementation(snapshot).libraries;
   const previous = lastReadingBefore(context);
@@ -923,7 +953,7 @@ function whyPanel(context: GithubContext): Omit<EmbedPayload, "footer">[] {
           MAX_DESCRIPTION,
         ),
         color: PALETTE.flat,
-        fields: [],
+        sections: [],
       },
     ];
   }
@@ -934,10 +964,10 @@ function whyPanel(context: GithubContext): Omit<EmbedPayload, "footer">[] {
 
   // A rise needs no explanation, so the panel says why it rose and stops there;
   // the interesting branch is the fall people ask about.
-  const fields: EmbedField[] =
+  const fields: ViewSection[] =
     decomposition === null
-      ? [unreadableField(previous.value, now)]
-      : [splitField(previous.value, now, decomposition), ...causeFields(context, comparison)];
+      ? [unreadableSection(previous.value, now)]
+      : [splitField(previous.value, now, decomposition), ...causeSections(context, comparison)];
 
   return [
     {
@@ -953,7 +983,7 @@ function whyPanel(context: GithubContext): Omit<EmbedPayload, "footer">[] {
         MAX_DESCRIPTION,
       ),
       color: colourFor(change),
-      fields: fields.slice(0, MAX_FIELDS),
+      sections: fields,
     },
   ];
 }
@@ -1012,10 +1042,10 @@ function splitField(
   before: ImplementationSeries,
   now: ImplementationSeries,
   decomposition: Decomposition,
-): EmbedField {
+): ViewSection {
   return {
-    name: "🧮 What moved the number",
-    value: body([
+    heading: "🧮 What moved the number",
+    text: body([
       `\`change  \` **${signed(decomposition.change)} pp**  ${formatValue(before.percent, 2)}% → ${formatValue(now.percent, 2)}%`,
       `\`work    \` ${signed(decomposition.fromWork)} pp  ${signed(decomposition.doneDelta, 0)} implemented ÷ ${formatCount(now.total)}`,
       `\`discover\` ${signed(decomposition.fromDiscovery)} pp  ${signed(decomposition.totalDelta, 0)} found ÷ ${formatCount(before.total)}`,
@@ -1026,10 +1056,10 @@ function splitField(
 }
 
 /** @returns the field shown when the two readings carry no comparable totals. */
-function unreadableField(before: ImplementationSeries, now: ImplementationSeries): EmbedField {
+function unreadableSection(before: ImplementationSeries, now: ImplementationSeries): ViewSection {
   return {
-    name: "🧮 What moved the number",
-    value: body([
+    heading: "🧮 What moved the number",
+    text: body([
       `\`${formatCount(before.done)}\` / \`${formatCount(before.total)}\` → \`${formatCount(now.done)}\` / \`${formatCount(now.total)}\``,
       "One of the two readings has no usable total, so the change cannot be split into work and discovery.",
     ]),
@@ -1065,7 +1095,7 @@ function clue(decomposition: Decomposition): string {
  * predates the table being stored, the field says so and gives the totals instead
  * of inventing a per-library story.
  */
-function causeFields(context: GithubContext, comparison: SnapshotRecord): EmbedField[] {
+function causeSections(context: GithubContext, comparison: SnapshotRecord): ViewSection[] {
   const latest = context.latest as SnapshotRecord;
   const after = readLibraries(latest);
   const before = readLibraries(comparison);
@@ -1073,8 +1103,8 @@ function causeFields(context: GithubContext, comparison: SnapshotRecord): EmbedF
   if (before.length === 0 || after.length === 0) {
     return [
       {
-        name: "🔬 Which libraries",
-        value: body([
+        heading: "🔬 Which libraries",
+        text: body([
           before.length === 0
             ? "▬ the earlier snapshot stored no per-library table, so the growth cannot be attributed to a library."
             : "▬ this snapshot stored no per-library table, so there is nothing to attribute yet.",
@@ -1084,11 +1114,11 @@ function causeFields(context: GithubContext, comparison: SnapshotRecord): EmbedF
   }
 
   const analysis = analyzeLibraries(before, after, 3);
-  return [discoveryField(analysis), workField(analysis), ...setChangeFields(analysis)];
+  return [discoverySection(analysis), workSection(analysis), ...setChangeSections(analysis)];
 }
 
 /** @returns the libraries whose denominator grew — the usual cause of a fall. */
-function discoveryField(analysis: LibraryAnalysis): EmbedField {
+function discoverySection(analysis: LibraryAnalysis): ViewSection {
   const lines =
     analysis.discovered.length === 0
       ? ["▬ no library's denominator grew, so discovery was not what moved the share."]
@@ -1096,11 +1126,11 @@ function discoveryField(analysis: LibraryAnalysis): EmbedField {
           const added = movement.after.total - movement.before.total;
           return `\`${clip(movement.label, 20).padEnd(20, " ")}\` +${formatCount(added)} found · ${formatCount(movement.before.total)} → ${formatCount(movement.after.total)} total`;
         });
-  return { name: "🔬 Newly discovered work", value: body(lines) };
+  return { heading: "🔬 Newly discovered work", text: body(lines) };
 }
 
 /** @returns the libraries where implemented functions rose, or fell. */
-function workField(analysis: LibraryAnalysis): EmbedField {
+function workSection(analysis: LibraryAnalysis): ViewSection {
   const lines: string[] = [];
   for (const movement of analysis.grew) {
     lines.push(
@@ -1113,13 +1143,13 @@ function workField(analysis: LibraryAnalysis): EmbedField {
     );
   }
   return {
-    name: "🛠️ Work recorded",
-    value: body(lines.length === 0 ? ["▬ no library's implemented count changed."] : lines),
+    heading: "🛠️ Work recorded",
+    text: body(lines.length === 0 ? ["▬ no library's implemented count changed."] : lines),
   };
 }
 
 /** @returns libraries that joined or left the scan, when any did. */
-function setChangeFields(analysis: LibraryAnalysis): EmbedField[] {
+function setChangeSections(analysis: LibraryAnalysis): ViewSection[] {
   const { added, removed } = analysis.setChange;
   if (added.length === 0 && removed.length === 0) {
     return [];
@@ -1131,8 +1161,8 @@ function setChangeFields(analysis: LibraryAnalysis): EmbedField[] {
       .join(", ");
   return [
     {
-      name: "🔄 The scan's library set changed",
-      value: body([
+      heading: "🔄 The scan's library set changed",
+      text: body([
         ...(added.length === 0 ? [] : [`➕ now analysed: ${clip(names(added), 300)}`]),
         ...(removed.length === 0 ? [] : [`➖ no longer analysed: ${clip(names(removed), 300)}`]),
         "A library joining the scan adds its functions to the denominator, which lowers the share on its own.",
@@ -1172,7 +1202,7 @@ function footerFor(context: GithubContext): string {
  * A fresh watch is a valid state, not an error: the reply says what will appear
  * and when rather than showing empty percentages that would read as 0%.
  */
-function freshWatchEmbed(context: GithubContext): EmbedPayload {
+function freshWatchBlock(context: GithubContext): ViewBlock {
   return {
     title: `${context.fullName} — waiting for the first reading`,
     url: context.repoUrl,
@@ -1187,7 +1217,7 @@ function freshWatchEmbed(context: GithubContext): EmbedPayload {
       MAX_DESCRIPTION,
     ),
     color: PALETTE.idle,
-    fields: [],
+    sections: [],
     footer: `${context.fullName} · 0 snapshots`,
   };
 }

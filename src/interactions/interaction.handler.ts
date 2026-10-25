@@ -89,9 +89,6 @@ import {
  */
 const GITHUB_HISTORY_ROWS = 72;
 
-/** Embeds Discord accepts in one message. */
-const GITHUB_MAX_EMBEDS = 10;
-
 /**
  * Interactions that carry a guild member and can therefore be gated.
  *
@@ -540,16 +537,10 @@ export class InteractionHandler {
           ownerId: interaction.user.id,
         }),
       );
-      if (payload.embeds.length > GITHUB_MAX_EMBEDS) {
-        // The click is already acknowledged, so this has to be a follow-up; the
-        // original panel stays on screen rather than being replaced by an error.
-        await this.safeReply(
-          interaction,
-          `That panel needs ${payload.embeds.length} embeds, and a message holds ${GITHUB_MAX_EMBEDS}.`,
-        );
-        return;
-      }
-      await interaction.editReply({ embeds: payload.embeds, components: payload.components });
+      await interaction.editReply({
+        components: payload.components,
+        flags: MessageFlags.IsComponentsV2,
+      });
     } catch (error) {
       this.logger.error("Failed to render a /github panel", error, {
         customId: interaction.customId,

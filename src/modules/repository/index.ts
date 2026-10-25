@@ -51,12 +51,12 @@ export {
   type ComponentButton,
   type ComponentRows,
   type ComponentSelect,
-  type EmbedField,
-  type EmbedPayload,
   type GithubContext,
   type GithubPanel,
   type GithubView,
   type PanelRequest,
+  type ViewBlock,
+  type ViewSection,
 } from "./github-view.js";
 export {
   analyzeLibraries,
@@ -74,7 +74,13 @@ export {
   type SeriesPoint,
   type TrendSummary,
 } from "./repository-analytics.js";
-export { renderView, toComponents, toEmbed, type ReplyPayload } from "./github-components.js";
+export {
+  renderView,
+  toComponents,
+  toContainer,
+  IS_COMPONENTS_V2,
+  type ReplyPayload,
+} from "./github-components.js";
 export type {
   MonitorRecord,
   PendingEvent,

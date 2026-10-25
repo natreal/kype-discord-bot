@@ -36,6 +36,8 @@ import {
   parsePanelCustomId,
   isGithubComponent,
 } from "../../src/modules/repository/github-view.js";
+import { renderView } from "../../src/modules/repository/github-components.js";
+import { ComponentType } from "discord.js";
 import {
   drawColumns,
   fenceChart,
@@ -438,21 +440,98 @@ describe("buildGithubView", () => {
 
   it("explains an empty watch instead of showing zeroes", () => {
     const view = buildGithubView(context([], "overview"));
-    expect(view.embeds).toHaveLength(1);
+    expect(view.blocks).toHaveLength(1);
     // No panel buttons before there is anything to switch between; the selector is
     // still there, because every panel explains the empty state in its own words.
     expect(view.components.buttons).toEqual([]);
-    expect(view.embeds[0]?.description).not.toContain("0%");
-    expect(view.embeds[0]?.description.toLowerCase()).toContain("no snapshot has been stored");
+    const description = view.blocks[0]?.description ?? "";
+    expect(description).not.toContain("0%");
+    expect(description.toLowerCase()).toContain("no snapshot has been stored");
   });
 
   it("gives every panel a body and a footer", () => {
     for (const panel of ["overview", "libraries", "timeline", "graph", "why"] as const) {
       const view = buildGithubView(context(growth, panel));
-      expect(view.embeds.length).toBeGreaterThan(0);
-      for (const embed of view.embeds) {
-        expect(embed.title.length).toBeGreaterThan(0);
-        expect(embed.footer.length).toBeGreaterThan(0);
+      expect(view.blocks.length).toBeGreaterThan(0);
+      for (const block of view.blocks) {
+        expect(block.title.length).toBeGreaterThan(0);
+        expect(block.footer.length).toBeGreaterThan(0);
+      }
+    }
+  });
+
+  it("renders as Components V2, which cannot carry an embed at all", () => {
+    const view = buildGithubView(context(growth, "overview"));
+    const payload = renderView(view);
+    // The whole point of the migration: a container of text blocks, not embeds. A V2
+    // message drops `embeds` and `content` entirely, so a regression that reintroduced
+    // either would make Discord reject the reply rather than render it smaller.
+    expect("embeds" in payload).toBe(false);
+    const rendered = payload.components.map((component) => component.toJSON()) as {
+      type: number;
+      components?: { type: number; content?: string }[];
+    }[];
+    expect(rendered[0]?.type).toBe(ComponentType.Container);
+    const texts = rendered.flatMap((component) => component.components ?? []);
+    expect(texts.some((text) => text.type === ComponentType.TextDisplay)).toBe(true);
+    for (const text of texts) {
+      expect((text.content ?? "").length).toBeLessThanOrEqual(MAX_FIELD);
+    }
+    // Discord accepts forty components per message; a panel is a handful.
+    const total = rendered.reduce(
+      (count, component) => count + 1 + (component.components?.length ?? 0),
+      0,
+    );
+    expect(total).toBeLessThanOrEqual(40);
+  });
+
+  it("keeps every overview section instead of stopping at an embed's field cap", () => {
+    // Twenty-four readings give the overview a trend section, a library breakdown and
+    // the pace estimate alongside the two headlines — more than a single embed field
+    // grid was ever guaranteed to show.
+    const history = Array.from({ length: 24 }, (_, index) =>
+      snapshot(
+        24 - index,
+        { done: 1_000 + index * 10, total: 11_697, percent: 8.55 + index / 10 },
+        [group("audio", 100 + index, 1_000), group("gpu", 900 + index, 8_000)],
+      ),
+    );
+    const view = buildGithubView(context(history, "overview"));
+    const headings = view.blocks.flatMap((block) =>
+      [...block.sections].map((section) => section.heading),
+    );
+    expect(headings.some((heading) => heading.includes("System libraries"))).toBe(true);
+    expect(headings.some((heading) => heading.includes("GPU shaders"))).toBe(true);
+    expect(headings.some((heading) => heading.includes("Community"))).toBe(true);
+    // Nothing is silently dropped: every section built reaches the reply.
+    for (const block of view.blocks) {
+      expect(block.sections.length).toBeGreaterThan(0);
+    }
+    expect(headings.length).toBeGreaterThan(3);
+  });
+
+  it("survives an absurdly long repository name without blanking the panel", () => {
+    // `GITHUB_REPOSITORY` is operator-supplied and unbounded. A single text block over
+    // Discord's limit would make the whole reply rejected, so the heading is clipped.
+    const fullName = `${"o".repeat(300)}/${"n".repeat(300)}`;
+    const view = buildGithubView({
+      fullName,
+      repoUrl: `https://github.com/${fullName}`,
+      history: [snapshot(0, { done: 10, total: 100, percent: 10 })],
+      latest: snapshot(0, { done: 10, total: 100, percent: 10 }),
+      panel: "overview",
+      style: "line",
+      width: 16,
+      ownerId: null,
+    });
+    const payload = renderView(view);
+    const rendered = payload.components.map((component) => component.toJSON()) as {
+      type: number;
+      components?: { type: number; content?: string }[];
+    }[];
+    for (const component of rendered) {
+      for (const text of component.components ?? []) {
+        expect((text.content ?? "").length).toBeLessThanOrEqual(400);
       }
     }
   });
@@ -476,16 +555,19 @@ describe("buildGithubView", () => {
       snapshot(40 - index, { done: 1_000 + index, total: 11_697, percent: 8.55 + index / 100 }),
     );
     const view = buildGithubView(context(history, "graph", { width: 12 }));
-    // Every chart field is fenced and then captioned, so only the lines between the
-    // fences are drawn rows; the caption beneath them is prose. `flatMap` is avoided
-    // here: its index argument would turn `embed.fields` into a `slice`, dropping pages
-    // and leaving holes that read as `undefined`.
-    const fields = view.embeds
-      .map((embed) => embed.fields)
-      .reduce<{ name: string; value: string }[]>((all, embedFields) => all.concat(embedFields), []);
-    const charts = fields
-      .map((field) => field.value)
-      .filter((value) => value.includes("```") && /[▁▂▃▄▅▆▇█]/.test(value));
+    // Every chart section is fenced and then captioned, so only the lines between the
+    // fences are drawn rows; the caption beneath them is prose. Sections are flattened
+    // without `flatMap`, whose index argument would turn `block.sections` into a
+    // `slice`, dropping pages and leaving holes that read as `undefined`.
+    const sections = view.blocks
+      .map((block) => block.sections)
+      .reduce<{ heading: string; text: string }[]>(
+        (all, blockSections) => all.concat(blockSections),
+        [],
+      );
+    const charts = sections
+      .map((section) => section.text)
+      .filter((text) => text.includes("```") && /[▁▂▃▄▅▆▇█]/.test(text));
     expect(charts.length).toBeGreaterThan(0);
     for (const chart of charts) {
       const fenced = chart.split("```")[1] ?? "";
@@ -509,7 +591,7 @@ describe("buildGithubView — why the share moved", () => {
     group("gpu", 2_200, 8_206),
   ]);
 
-  /** @returns a panel's whole text, description and fields together. */
+  /** @returns a panel's whole text, description and sections together. */
   function textOf(history: readonly SnapshotRecord[], panel: GithubPanel): string {
     const view = buildGithubView({
       fullName: "anyps5/anyps5",
@@ -521,11 +603,12 @@ describe("buildGithubView — why the share moved", () => {
       width: 16,
       ownerId: null,
     });
-    return view.embeds
-      .map((embed) =>
-        [embed.description, ...embed.fields.map((field) => `${field.name}\n${field.value}`)].join(
-          "\n",
-        ),
+    return view.blocks
+      .map((block) =>
+        [
+          block.description,
+          ...block.sections.map((section) => `${section.heading}\n${section.text}`),
+        ].join("\n"),
       )
       .join("\n");
   }
@@ -567,7 +650,7 @@ describe("buildGithubView — why the share moved", () => {
     expect(text).not.toContain("📚 System libraries — 0.00%");
   });
 
-  it("lists every library across as many embeds as it needs", () => {
+  it("lists every library, however many there are", () => {
     const many = Array.from({ length: 60 }, (_, index) => group(`lib-${index}`, index, 100));
     const view = buildGithubView({
       fullName: "anyps5/anyps5",
@@ -579,26 +662,27 @@ describe("buildGithubView — why the share moved", () => {
       width: 16,
       ownerId: null,
     });
-    expect(view.embeds.length).toBeGreaterThan(1);
-    // Each page lists its libraries inside one field value, labelled by name.
-    // Each page lists its libraries inside one field value, labelled by name. The
-    // fields are flattened without `flatMap`, whose index argument turns `embed.fields`
-    // into a `slice`, leaving holes that read as `undefined`.
-    const text = view.embeds
-      .map((embed) => embed.fields)
-      .reduce<{ name: string; value: string }[]>((all, fields) => all.concat(fields), [])
-      .map((field) => field.value)
+    // Each page lists its libraries inside one section text, labelled by name. The
+    // sections are flattened without `flatMap`, whose index argument turns
+    // `block.sections` into a `slice`, leaving holes that read as `undefined`.
+    const text = view.blocks
+      .map((block) => block.sections)
+      .reduce<{ heading: string; text: string }[]>((all, sections) => all.concat(sections), [])
+      .map((section) => section.text)
       .join("\n");
     for (const library of many) {
       expect(text).toContain(library.label);
     }
-    // No page may overflow the field budget, because anything past it is truncated
+    // No text block may overflow its budget, because anything past it is truncated
     // without a trace and silently drops the libraries at the end of the page.
-    for (const embed of view.embeds) {
-      for (const field of embed.fields) {
-        expect(field.value.length).toBeLessThanOrEqual(MAX_FIELD);
+    for (const block of view.blocks) {
+      for (const section of block.sections) {
+        expect(section.text.length).toBeLessThanOrEqual(MAX_FIELD);
       }
     }
+    // A V2 reply is a handful of components, nowhere near Discord's ceiling of forty,
+    // so a project with many libraries is never told to pick a shorter panel.
+    expect(view.blocks.length).toBeLessThanOrEqual(20);
   });
 });
 
