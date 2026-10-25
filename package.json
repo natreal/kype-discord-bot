@@ -40,6 +40,7 @@
     "deploy:clear-guilds": "tsx --env-file-if-exists=.env scripts/clear-guild-commands.ts",
     "whoami": "tsx --env-file-if-exists=.env scripts/whoami.ts",
     "invite": "tsx --env-file-if-exists=.env scripts/invite.ts",
+    "monitor": "tsx --env-file-if-exists=.env scripts/monitor.ts",
     "invite:admin": "tsx --env-file-if-exists=.env scripts/invite.ts administrator --guild",
     "bot:start": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/windows/botctl.ps1 start",
     "bot:stop": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/windows/botctl.ps1 stop",
