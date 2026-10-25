@@ -1327,6 +1327,7 @@ That loop is what makes the window 24/7 rather than "until something goes wrong"
 | `q` still means quit   | A clean exit (code 0) closes the window instead of being undone a second later        |
 | Only one window        | `monitor:start` refuses when a runner is already up; the task uses `IgnoreNew`         |
 | Nothing else is killed | `monitor:stop` acts only on command lines naming `monitor-run.ps1` or `scripts\monitor.ts` |
+| No orphan windows      | `stop` also closes the window, found by the title `--suppressApplicationTitle` pins — Windows Terminal keeps a window standing after its tab is force-killed |
 | Starts at login        | Task `kype-anyps5-monitor`, at logon, interactive, no execution time limit, runs on battery |
 
 Unlike the bot's login item this task is **visible** by design — a monitor nobody can

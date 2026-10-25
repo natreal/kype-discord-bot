@@ -83,6 +83,63 @@ function Get-StartedAt([int]$ProcessId) {
   return $proc.StartTime
 }
 
+# --- the window itself ------------------------------------------------------
+# Killing the tab's process tree is not the same as closing the window: Windows
+# Terminal keeps a window standing (with no console in it) when its last tab's
+# process is force-killed, and a 24/7 monitor that leaves an empty window behind on
+# every restart is worse than no window. So the window is closed too, found by the
+# title `--title` sets - which `--suppressApplicationTitle` stops the application
+# from overwriting, so the title is ours to trust.
+if (-not ("MonitorWindow" -as [type])) {
+  Add-Type -TypeDefinition @'
+using System;
+using System.Collections.Generic;
+using System.Runtime.InteropServices;
+using System.Text;
+
+public class MonitorWindow
+{
+    private delegate bool EnumProc(IntPtr hWnd, IntPtr lParam);
+    [DllImport("user32.dll")] private static extern bool EnumWindows(EnumProc callback, IntPtr param);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)] private static extern int GetWindowTextW(IntPtr hWnd, StringBuilder text, int count);
+    [DllImport("user32.dll")] private static extern bool IsWindowVisible(IntPtr hWnd);
+    [DllImport("user32.dll")] private static extern bool PostMessageW(IntPtr hWnd, uint message, IntPtr wParam, IntPtr lParam);
+
+    /// Handles of the visible top-level windows whose title contains `title`.
+    public static long[] Find(string title)
+    {
+        List<long> found = new List<long>();
+        EnumWindows(delegate(IntPtr hWnd, IntPtr param)
+        {
+            if (!IsWindowVisible(hWnd)) { return true; }
+            StringBuilder text = new StringBuilder(512);
+            GetWindowTextW(hWnd, text, 512);
+            if (text.ToString().IndexOf(title, StringComparison.OrdinalIgnoreCase) >= 0) { found.Add(hWnd.ToInt64()); }
+            return true;
+        }, IntPtr.Zero);
+        return found.ToArray();
+    }
+
+    /// Posts WM_CLOSE, which is what the window's own close button does.
+    public static void Close(long handle)
+    {
+        PostMessageW(new IntPtr(handle), 0x0010, IntPtr.Zero, IntPtr.Zero);
+    }
+}
+'@
+}
+
+$WindowTitle = "anyPS5 monitor"
+
+function Close-MonitorWindows {
+  $closed = 0
+  foreach ($handle in [MonitorWindow]::Find($WindowTitle)) {
+    [MonitorWindow]::Close($handle)
+    $closed += 1
+  }
+  return $closed
+}
+
 # The monitor itself: node running tsx over scripts\monitor.ts. It is found by its
 # command line rather than by a pid file because a killed window can leave it
 # behind, still polling, with nothing on screen to say so.
@@ -174,9 +231,12 @@ switch ($Command) {
     $wt = (Get-Command wt.exe -ErrorAction SilentlyContinue).Source
 
     if ($wt) {
-      # `new-tab` with no window to attach to opens one, and -d sets the working
-      # directory so monitor.ts finds .env and package.json without being told.
-      $wtArgs = "new-tab -d ""$ProjectDir"" --title ""anyPS5 monitor"" ""$psExe"" $runnerArgs"
+      # -w -1 forces a window of its own: plain `new-tab` attaches to whatever
+      # Windows Terminal window is in front, and a tab in somebody's working window
+      # is neither a 24/7 monitor nor theirs to close. --suppressApplicationTitle
+      # keeps the title below, which is how `stop` finds the window again. -d is the
+      # working directory, so monitor.ts finds .env and package.json without being told.
+      $wtArgs = "-w -1 new-tab -d ""$ProjectDir"" --title ""$WindowTitle"" --suppressApplicationTitle ""$psExe"" $runnerArgs"
       $process = Start-Process -FilePath $wt -ArgumentList $wtArgs -PassThru -ErrorAction SilentlyContinue
       $runner = if ($process) { Wait-ForRunner 20 } else { $null }
       if ($runner) {
@@ -203,12 +263,6 @@ switch ($Command) {
     $runner = Get-MonitorRunnerPid
     $nodes = @(Get-MonitorNode)
 
-    if (-not $runner -and $nodes.Count -eq 0) {
-      Remove-Item $PidFile -ErrorAction SilentlyContinue
-      Write-Host "The monitor is not running."
-      return
-    }
-
     if ($runner) {
       Write-Host "Closing the monitor window (pid $runner)..."
       Stop-Tree $runner
@@ -218,19 +272,34 @@ switch ($Command) {
       Stop-Tree ([int]$node.ProcessId)
     }
 
-    for ($i = 0; $i -lt 20; $i++) {
+    # Ten half-second probes are enough for a tree kill to take effect; each probe
+    # is a CIM query, and a stop that spends twenty seconds confirming itself reads
+    # like a hang.
+    for ($i = 0; $i -lt 10; $i++) {
       if (-not (Get-MonitorRunnerPid) -and @(Get-MonitorNode).Count -eq 0) { break }
       Start-Sleep -Milliseconds 500
     }
-    # A window that outlived the kill would still be painting frames, so say so
-    # rather than claim a stop that did not happen.
+    # A window that outlived the kill would still be on the desktop with nothing in
+    # it, so it is closed here whether or not anything was running inside it.
+    $windows = Close-MonitorWindows
+    if ($windows -gt 0) {
+      Start-Sleep -Milliseconds 500
+      Write-Host ("Closed {0} monitor window(s)." -f $windows)
+    }
+
+    # Anything still alive would still be painting frames; say so rather than claim
+    # a stop that did not happen.
     if (Get-MonitorRunnerPid -or @(Get-MonitorNode).Count -gt 0) {
       Write-Warning "Something is still running; run 'monitor:status' and check the pids above."
       exit 1
     }
 
     Remove-Item $PidFile -ErrorAction SilentlyContinue
-    Write-Host "Stopped."
+    if (-not $runner -and $nodes.Count -eq 0 -and $windows -eq 0) {
+      Write-Host "The monitor is not running."
+    } else {
+      Write-Host "Stopped."
+    }
   }
 
   "restart" {

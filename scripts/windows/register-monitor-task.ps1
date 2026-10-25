@@ -51,10 +51,13 @@ $runnerArgs = "-NoProfile -ExecutionPolicy Bypass -File `"$Runner`""
 $wt = (Get-Command wt.exe -ErrorAction SilentlyContinue).Source
 
 if ($wt) {
-  # `new-tab` on a machine with no Windows Terminal window opens one; -d is the
-  # working directory, which is how monitor.ts finds .env and the repository.
+  # -w -1 asks for a window of its own: `new-tab` on its own attaches to whichever
+  # Windows Terminal window is in front, and the monitor must not be a tab in
+  # somebody else's working window. -d is the working directory, which is how
+  # monitor.ts finds .env and the repository. --suppressApplicationTitle keeps this
+  # title, which is how monitorctl.ps1 stop finds the window again.
   $execute = $wt
-  $argument = "new-tab -d `"$ProjectDir`" --title `"anyPS5 monitor`" `"$psExe`" $runnerArgs"
+  $argument = "-w -1 new-tab -d `"$ProjectDir`" --title `"anyPS5 monitor`" --suppressApplicationTitle `"$psExe`" $runnerArgs"
 } else {
   # A plain console window shows the same frame; it only lacks WT's resize handling.
   $execute = $psExe
