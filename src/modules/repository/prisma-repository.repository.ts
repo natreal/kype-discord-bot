@@ -17,6 +17,7 @@ import type { AnyPs5Progress } from "../../services/anyps5/progress.js";
 import type {
   MonitorRecord,
   PendingEvent,
+  ReportCommit,
   RepositoryMonitorRepository,
   SnapshotInput,
   SnapshotRecord,
@@ -150,6 +151,28 @@ export class PrismaRepositoryMonitorRepository implements RepositoryMonitorRepos
     }
   }
 
+  public async snapshotsBetween(
+    repositoryId: string,
+    from: Date,
+    to: Date,
+    limit: number,
+  ): Promise<SnapshotRecord[]> {
+    try {
+      // Newest first with `take`, then reversed: a long window must keep its most
+      // recent readings rather than an arbitrary oldest `limit`.
+      const rows = await this.prisma.repositorySnapshot.findMany({
+        where: { repositoryId, capturedAt: { gte: from, lte: to } },
+        orderBy: { capturedAt: "desc" },
+        take: limit,
+      });
+      // `toSnapshot` parses the stored document, so this is the read that actually
+      // pays for the per-library table — which is why it is not the default one.
+      return rows.reverse().map(toSnapshot);
+    } catch (error) {
+      throw toDatabaseError(error, "repository.snapshotsBetween");
+    }
+  }
+
   public async upsertCommits(
     repositoryId: string,
     commits: readonly RepositoryCommit[],
@@ -212,6 +235,7 @@ export class PrismaRepositoryMonitorRepository implements RepositoryMonitorRepos
           merged: pull.merged,
           createdAt: pull.createdAt,
           mergedAt: pull.mergedAt,
+          closedAt: pull.closedAt,
           url: pull.url,
         };
         await this.prisma.repositoryPullRequestRecord.upsert({
@@ -254,6 +278,52 @@ export class PrismaRepositoryMonitorRepository implements RepositoryMonitorRepos
       return rows.map(toPullRequestRecord);
     } catch (error) {
       throw toDatabaseError(error, "repository.recentPullRequests");
+    }
+  }
+
+  public async pullRequestsBetween(
+    repositoryId: string,
+    from: Date,
+    to: Date,
+    limit: number,
+  ): Promise<readonly RepositoryPullRequest[]> {
+    try {
+      const window = { gte: from, lte: to };
+      const rows = await this.prisma.repositoryPullRequestRecord.findMany({
+        // `OR` across the three timestamps, not a creation filter: a report asks what
+        // *happened* in the window, and a merge is an event that can arrive long after
+        // the creation it belongs to.
+        where: {
+          repositoryId,
+          OR: [{ createdAt: window }, { mergedAt: window }, { closedAt: window }],
+        },
+        orderBy: { number: "desc" },
+        take: limit,
+      });
+      return rows.map(toPullRequestRecord);
+    } catch (error) {
+      throw toDatabaseError(error, "repository.pullRequestsBetween");
+    }
+  }
+
+  public async commitsBetween(
+    repositoryId: string,
+    from: Date,
+    to: Date,
+    limit: number,
+  ): Promise<readonly ReportCommit[]> {
+    try {
+      const rows = await this.prisma.repositoryCommitRecord.findMany({
+        where: { repositoryId, committedAt: { gte: from, lte: to } },
+        orderBy: { committedAt: "desc" },
+        take: limit,
+        // Prisma errors on an unknown key in `select`, and a report never reads the URL,
+        // so these four columns are the whole of what it needs from a commit row.
+        select: { sha: true, message: true, author: true, committedAt: true },
+      });
+      return rows;
+    } catch (error) {
+      throw toDatabaseError(error, "repository.commitsBetween");
     }
   }
 
@@ -339,6 +409,7 @@ function toPullRequestRecord(row: {
   merged: boolean;
   createdAt: Date;
   mergedAt: Date | null;
+  closedAt: Date | null;
   url: string;
 }): RepositoryPullRequest {
   return {
@@ -351,6 +422,7 @@ function toPullRequestRecord(row: {
     merged: row.merged,
     createdAt: row.createdAt,
     mergedAt: row.mergedAt,
+    closedAt: row.closedAt,
     url: row.url,
   };
 }

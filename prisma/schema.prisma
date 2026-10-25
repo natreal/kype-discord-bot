@@ -1176,6 +1176,14 @@ model RepositoryPullRequestRecord {
   merged       Boolean  @default(false)
   createdAt    DateTime
   mergedAt     DateTime?
+  /// When the pull request stopped being open, merged or not.
+  ///
+  /// Stored because `/github report` buckets closures by *when they happened*, and
+  /// `mergedAt` alone cannot answer "how many were closed without merging in this
+  /// hour". Nullable on purpose: a row first seen already closed by GitHub's payload
+  /// without the field keeps a null rather than a guessed timestamp, and the report
+  /// counts it as "unknown" instead of placing it in an hour it may not belong to.
+  closedAt     DateTime?
   url          String
   firstSeenAt  DateTime @default(now())
   updatedAt    DateTime @updatedAt
@@ -1184,6 +1192,7 @@ model RepositoryPullRequestRecord {
 
   @@unique([repositoryId, number])
   @@index([repositoryId, createdAt])
+  @@index([repositoryId, mergedAt])
   @@map("repository_pull_requests")
 }
 

@@ -8,6 +8,9 @@
  *   /github why                — why the share moved: work, or new discoveries
  *   /github history [limit]    — the recorded snapshots, oldest first (12 by default,
  *                                25 at most)
+ *   /github report [range]     — a paged report over 4h, 12h, 1d, 3d or 7d: counts,
+ *                                rates, review time, the hour-by-hour series, the
+ *                                libraries that moved, and how complete the data is
  *   /github refresh            — take a snapshot now instead of waiting for the hourly
  *                                task
  *
@@ -37,6 +40,12 @@ import {
   type GithubContext,
   type GithubPanel,
 } from "../../modules/repository/github-view.js";
+import {
+  buildReportStats,
+  reportWindowFor,
+  REPORT_RANGES,
+} from "../../modules/repository/repository-report.analytics.js";
+import { renderReport } from "../../modules/repository/github-report.view.js";
 import { renderView, type ReplyPayload } from "../../modules/repository/github-components.js";
 import type { ChartStyle } from "../../modules/repository/repository-chart.js";
 import type { RepositoryMonitorService } from "../../modules/repository/repository.service.js";
@@ -93,8 +102,15 @@ export default defineSlashCommand({
     name: "github",
     description: "Show the implementation progress of the watched GitHub project.",
     category: "utility",
-    usage: "/github [overview|libraries|timeline|graph|why|history|refresh]",
-    examples: ["/github", "/github graph style:bars", "/github why", "/github history limit:12"],
+    usage: "/github [overview|libraries|timeline|graph|why|history|report|refresh]",
+    examples: [
+      "/github",
+      "/github graph style:bars",
+      "/github why",
+      "/github history limit:12",
+      "/github report",
+      "/github report range:4h",
+    ],
   },
   // `status` and `history` only read stored snapshots, so the command declares no
   // permission of its own: they stay open to every member, the way `/ticket open` is.
@@ -143,6 +159,19 @@ export default defineSlashCommand({
         ),
     )
     .addSubcommand((sub) =>
+      withStyle(
+        sub
+          .setName("report")
+          .setDescription("A paged report over a window: counts, rates, review time, libraries.")
+          .addStringOption((option) =>
+            option
+              .setName("range")
+              .setDescription("How far back to report (default: 1 day).")
+              .addChoices(...REPORT_RANGES.map((range) => ({ name: range.label, value: range.id }))),
+          ),
+      ),
+    )
+    .addSubcommand((sub) =>
       sub.setName("refresh").setDescription("Take a snapshot now, and announce what changed."),
     ),
 
@@ -174,6 +203,10 @@ export default defineSlashCommand({
     }
     if (subcommand === "history") {
       await handleHistory(interaction, monitor);
+      return;
+    }
+    if (subcommand === "report") {
+      await handleReport(interaction, monitor);
       return;
     }
 
@@ -290,6 +323,59 @@ async function handleHistory(
 /** @returns a percentage, keeping "no reading" distinct from 0%. */
 function percentCell(value: number | null): string {
   return value === null ? "—" : `${value}%`;
+}
+
+/**
+ * `/github report` — a paged report over the window the reader asked for.
+ *
+ * Read-only, like the panels: every figure comes from what the monitor already stored,
+ * so running it costs one database read and no GitHub request. That is deliberate — a
+ * report that fetched would spend rate limit on data the bot has already paid for.
+ */
+async function handleReport(
+  interaction: ChatInputCommandInteraction,
+  monitor: RepositoryMonitorService,
+): Promise<void> {
+  const rangeId = interaction.options.getString("range") ?? "1d";
+  const now = new Date();
+  const window = reportWindowFor(rangeId, now);
+  const data = await monitor.reportWindow(window.from, window.to);
+
+  if (data.snapshots.length === 0 && data.pullRequests.length === 0) {
+    await interaction.editReply({
+      embeds: [
+        brandedEmbed(`${monitor.fullName} — report`).setDescription(
+          "Nothing is recorded in that window yet. The monitor fills in as it refreshes; " +
+            "`/github refresh` takes a snapshot now.",
+        ),
+      ],
+    });
+    return;
+  }
+
+  const stats = buildReportStats({
+    rangeId,
+    window: { from: data.from, to: data.to },
+    snapshots: data.snapshots,
+    pullRequests: data.pullRequests,
+    commits: data.commits.map((commit) => ({
+      at: commit.committedAt,
+      author: commit.author,
+      message: commit.message,
+    })),
+  });
+
+  await interaction.editReply({
+    components: renderView(
+      renderReport({
+        stats,
+        fullName: monitor.fullName,
+        repoUrl: `https://github.com/${monitor.fullName}`,
+        page: "overview",
+      }),
+    ).components,
+    flags: MessageFlags.IsComponentsV2,
+  });
 }
 
 /** `/github refresh` — a snapshot now, with the same announcement rules. */

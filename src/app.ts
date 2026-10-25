@@ -848,6 +848,11 @@ export async function createApplication(): Promise<Application> {
         repositoryReport.publish(reading, previous, events),
     },
     logger,
+    // The cadence, so retention follows it. The count is fixed, so the *hours* it buys
+    // depend on how often the monitor runs — at an hourly cadence the same count is
+    // forty days, and at fifteen minutes it is ten. Passing the interval is what keeps
+    // the kept history covering the report's longest range either way.
+    intervalMinutes: config.repository.intervalMinutes,
   });
 
   const repositoryReport: DiscordRepositoryReport = new DiscordRepositoryReport({

@@ -34,7 +34,7 @@ import type {
 export interface MemoryMonitorRepository extends RepositoryMonitorRepository {
   readonly monitors: MonitorRecord[];
   readonly snapshots: (SnapshotInput & { readonly id: string })[];
-  readonly commits: { repositoryId: string; sha: string }[];
+  readonly commits: (RepositoryCommit & { readonly repositoryId: string })[];
   /** Stored pull requests, in the shape the real table returns. */
   readonly pulls: (RepositoryPullRequest & { readonly repositoryId: string })[];
   readonly events: PendingEvent[];
@@ -59,7 +59,7 @@ function toPull(row: RepositoryPullRequest & { repositoryId: string }): Reposito
 export function memoryMonitorRepository(): MemoryMonitorRepository {
   const monitors: MonitorRecord[] = [];
   const snapshots: (SnapshotInput & { readonly id: string })[] = [];
-  const commits: { repositoryId: string; sha: string }[] = [];
+  const commits: (RepositoryCommit & { repositoryId: string })[] = [];
   const pulls: (RepositoryPullRequest & { repositoryId: string })[] = [];
   const events: PendingEvent[] = [];
   let counter = 0;
@@ -144,6 +144,18 @@ export function memoryMonitorRepository(): MemoryMonitorRepository {
       return Promise.resolve(rows.map(toSnapshotRecord));
     },
 
+    snapshotsBetween(repositoryId, from, to, limit) {
+      const rows = snapshots
+        .filter(
+          (row) =>
+            row.repositoryId === repositoryId &&
+            row.capturedAt.getTime() >= from.getTime() &&
+            row.capturedAt.getTime() <= to.getTime(),
+        )
+        .slice(-limit);
+      return Promise.resolve(rows.map(toSnapshotRecord));
+    },
+
     upsertCommits(repositoryId, incoming: readonly RepositoryCommit[]) {
       const fresh: string[] = [];
       for (const commit of incoming) {
@@ -151,7 +163,7 @@ export function memoryMonitorRepository(): MemoryMonitorRepository {
           (row) => row.repositoryId === repositoryId && row.sha === commit.sha,
         );
         if (!known) {
-          commits.push({ repositoryId, sha: commit.sha });
+          commits.push({ ...commit, repositoryId });
           fresh.push(commit.sha);
         }
       }
@@ -167,14 +179,14 @@ export function memoryMonitorRepository(): MemoryMonitorRepository {
         );
         if (existing === undefined) {
           pulls.push({ ...pull, repositoryId });
-          // A pull request first seen closed arrived through the recently-closed
-          // window: it was not "opened" while the bot was watching.
+          // A pull request first seen closed arrived through a closed window: it was
+          // not "opened" while the bot was watching.
           if (pull.state === "open") {
             created.push(pull.number);
           }
-          if (pull.merged) {
-            merged.push(pull.number);
-          }
+          // A row first seen already merged is not a transition either: nothing the
+          // store holds says it changed. Whether it is *news* is `deriveEvents`' own
+          // question, answered from `mergedAt`, and that is the one place it belongs.
           continue;
         }
         if (pull.merged && !existing.merged) {
@@ -191,6 +203,42 @@ export function memoryMonitorRepository(): MemoryMonitorRepository {
         .sort((left, right) => right.createdAt.getTime() - left.createdAt.getTime())
         .slice(0, limit)
         .map(toPull);
+      return Promise.resolve(rows);
+    },
+
+    pullRequestsBetween(repositoryId, from, to, limit) {
+      const inWindow = (at: Date | null): boolean =>
+        at !== null && at.getTime() >= from.getTime() && at.getTime() <= to.getTime();
+      // The same three-timestamp rule the Prisma store uses: what happened in the
+      // window, not what was created in it.
+      const rows = pulls
+        .filter(
+          (row) =>
+            row.repositoryId === repositoryId &&
+            (inWindow(row.createdAt) || inWindow(row.mergedAt) || inWindow(row.closedAt)),
+        )
+        .sort((left, right) => right.number - left.number)
+        .slice(0, limit)
+        .map(toPull);
+      return Promise.resolve(rows);
+    },
+
+    commitsBetween(repositoryId, from, to, limit) {
+      const rows = commits
+        .filter(
+          (row) =>
+            row.repositoryId === repositoryId &&
+            row.committedAt.getTime() >= from.getTime() &&
+            row.committedAt.getTime() <= to.getTime(),
+        )
+        .sort((left, right) => right.committedAt.getTime() - left.committedAt.getTime())
+        .slice(0, limit)
+        .map((row) => ({
+          sha: row.sha,
+          message: row.message,
+          author: row.author,
+          committedAt: row.committedAt,
+        }));
       return Promise.resolve(rows);
     },
 

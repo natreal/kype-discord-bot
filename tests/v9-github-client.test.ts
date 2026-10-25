@@ -160,7 +160,7 @@ describe("repository configuration", () => {
     expect(testConfig().repository).toEqual({
       fullName: DEFAULT_REPOSITORY,
       token: undefined,
-      intervalMinutes: 60,
+      intervalMinutes: 15,
       reportChannelId: null,
     });
   });
@@ -195,6 +195,26 @@ describe("repository configuration", () => {
     expect(() =>
       createConfig(rawEnv({ GITHUB_POLL_INTERVAL_MINUTES: "1441" }), { loadEnvFiles: false }),
     ).toThrow(ConfigError);
+  });
+
+  it("refuses a cadence the anonymous rate limit cannot serve", () => {
+    // Five requests a refresh against 60 an hour: anything under 10m cannot be met,
+    // and the failure would otherwise appear days later as gaps in the history.
+    expect(() =>
+      createConfig(rawEnv({ GITHUB_POLL_INTERVAL_MINUTES: "5" }), { loadEnvFiles: false }),
+    ).toThrow(ConfigError);
+    // 10m is exactly 30 requests an hour, so it fits.
+    expect(
+      createConfig(rawEnv({ GITHUB_POLL_INTERVAL_MINUTES: "10" }), { loadEnvFiles: false })
+        .repository.intervalMinutes,
+    ).toBe(10);
+    // A token lifts the limit to 5,000 an hour, where a one-minute cadence is fine.
+    expect(
+      createConfig(
+        rawEnv({ GITHUB_POLL_INTERVAL_MINUTES: "1", GITHUB_TOKEN: "ghp_x" }),
+        { loadEnvFiles: false },
+      ).repository.intervalMinutes,
+    ).toBe(1);
   });
 
   it("rejects a report channel that is not a snowflake", () => {

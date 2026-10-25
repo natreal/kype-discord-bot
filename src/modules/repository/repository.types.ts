@@ -55,7 +55,24 @@ export interface SnapshotInput {
   readonly progress: AnyPs5Progress | null;
   readonly commitCount: number;
   readonly pullCount: number;
+  /**
+   * Recently merged pull requests, from the dedicated merge window.
+   *
+   * Stored through the same upsert as the row windows, and *only* through it: a merge
+   * is dated by `mergedAt`, and `mergedAt` reaches the database only when the payload
+   * that carried it does. Persisting this window is what lets `/github report` count
+   * merges precisely instead of inferring them from a percentage step.
+   */
+  readonly merges: readonly RepositoryPullRequest[];
   readonly failures: readonly string[];
+}
+
+/** One stored commit, as a report reads it: when it landed, who wrote it, what it said. */
+export interface ReportCommit {
+  readonly sha: string;
+  readonly message: string;
+  readonly author: string | null;
+  readonly committedAt: Date;
 }
 
 /** An event that has not been announced yet. */
@@ -97,6 +114,51 @@ export interface RepositoryMonitorRepository {
 
   /** The newest `limit` snapshots, oldest first, for a trend line. */
   recentSnapshots(repositoryId: string, limit: number): Promise<SnapshotRecord[]>;
+
+  /**
+   * The newest `limit` snapshots whose `capturedAt` falls in `[from, to)`, oldest
+   * first, with the published `progress.json` **included**.
+   *
+   * A separate read rather than an option on {@link recentSnapshots} because of what
+   * it costs: the stored document is a per-library table of roughly ten kilobytes per
+   * row, so a report over a day loads megabytes. Paying that on every `/github` panel
+   * would be wasting it; paying it once for a report that needs the table is the
+   * point of the command.
+   */
+  snapshotsBetween(
+    repositoryId: string,
+    from: Date,
+    to: Date,
+    limit: number,
+  ): Promise<SnapshotRecord[]>;
+
+  /**
+   * Every stored pull request created, merged or closed in `[from, to]`, newest
+   * creation first.
+   *
+   * Filtered in the database on the three timestamps rather than by reading the
+   * newest rows: `/github report` counts what happened in a window, and a pull request
+   * created last month but merged an hour ago belongs to that hour.
+   */
+  pullRequestsBetween(
+    repositoryId: string,
+    from: Date,
+    to: Date,
+    limit: number,
+  ): Promise<readonly RepositoryPullRequest[]>;
+
+  /**
+   * Stored commits with `committedAt` in `[from, to]`, newest first.
+   *
+   * Commits are their own table, so a report cannot get them from a snapshot: a window
+   * of snapshots says what the project was, and only this says how much landed.
+   */
+  commitsBetween(
+    repositoryId: string,
+    from: Date,
+    to: Date,
+    limit: number,
+  ): Promise<readonly ReportCommit[]>;
 
   /**
    * Stores a window of commits.

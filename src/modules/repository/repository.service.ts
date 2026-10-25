@@ -38,15 +38,70 @@ import {
 } from "../../services/anyps5/repository.types.js";
 import type {
   MonitorRecord,
+  ReportCommit,
   RepositoryMonitorRepository,
   SnapshotRecord,
 } from "./repository.types.js";
 import { deriveEvents } from "./repository.events.js";
 
-/** How many snapshots are kept per repository (about four days at hourly). */
-export const SNAPSHOT_RETENTION = 100;
-/** How many snapshots the history view reads (one day at hourly). */
+/**
+ * Snapshots kept per repository: a count, which becomes a cutoff when it is pruned.
+ *
+ * Sized so the count never cuts inside a window a report can ask for: at the default
+ * fifteen-minute refresh 960 rows is ten days. Pruning and reporting are two different
+ * measures — rows kept and hours asked for — and the row count has to be the larger one
+ * or `/github report range:1d` would silently lose its oldest hours after a few days.
+ */
+export const SNAPSHOT_RETENTION = 960;
+
+/**
+ * Hours of history kept, derived from the count at the configured cadence.
+ *
+ * The cutoff is in hours rather than rows because that is what the storage port prunes
+ * by (`pruneSnapshots(id, before)`), and because a cadence change must move the cutoff
+ * with it: ten days at fifteen minutes is 960 rows, and the same 960 at an hourly
+ * cadence would be forty days of rows but still one honest cutoff.
+ */
+export function retentionHours(intervalMinutes: number): number {
+  return (SNAPSHOT_RETENTION * Math.max(1, intervalMinutes)) / 60;
+}
+/** How many snapshots the history view reads (six hours at the default cadence). */
 export const HISTORY_WINDOW = 24;
+
+/**
+ * Snapshots one report reads at most.
+ *
+ * Equal to {@link SNAPSHOT_RETENTION}: the two are a pair, and a report reading fewer
+ * rows than are kept would drop the *oldest* hours of the longest range it offers —
+ * exactly the part a reader asking for a long range has not seen yet. The cap is still
+ * written down here, because a query needs one.
+ */
+export const REPORT_SNAPSHOT_ROWS = SNAPSHOT_RETENTION;
+
+/**
+ * Pull requests one report reads at most.
+ *
+ * Comfortably above what a repository creating a few pull requests a day can produce
+ * over the longest range offered, and still one bounded query.
+ */
+export const REPORT_PULL_ROWS = 2_000;
+
+/** The data one report is built from: one window, read once. */
+export interface ReportWindow {
+  /** Oldest instant included. */
+  readonly from: Date;
+  /** Newest instant included. */
+  readonly to: Date;
+  /** Snapshots in the window, oldest first, each with its published document. */
+  readonly snapshots: readonly SnapshotRecord[];
+  /** Pull requests created, merged or closed in the window. */
+  readonly pullRequests: readonly RepositoryPullRequest[];
+  /** Commits dated inside the window, newest first. */
+  readonly commits: readonly ReportCommit[];
+}
+
+/** Commits one report reads at most: a week of a very busy branch, and still one query. */
+export const REPORT_COMMIT_ROWS = 5_000;
 
 /** Where a report goes. Narrow on purpose: the service posts, it does not own Discord. */
 export interface RepositoryReportPort {
@@ -69,6 +124,14 @@ export interface RepositoryMonitorOptions {
   readonly logger: Logger;
   /** Overridable for tests; defaults to `() => new Date()`. */
   readonly now?: () => Date;
+  /**
+   * The refresh cadence, which sets how many hours of snapshots are kept.
+   *
+   * Optional so an existing caller keeps the hourly retention it had: a monitor that
+   * does not say how often it runs cannot know that ten days of history is the right
+   * window, and guessing shorter would throw away a week of a report's data.
+   */
+  readonly intervalMinutes?: number;
 }
 
 /** What one refresh did, for the task result detail and the tests. */
@@ -91,6 +154,8 @@ export class RepositoryMonitorService {
   private readonly report: RepositoryReportPort;
   private readonly logger: Logger;
   private readonly now: () => Date;
+  /** History kept, in hours, derived from the refresh cadence. */
+  private readonly retentionHours: number;
 
   public constructor(options: RepositoryMonitorOptions) {
     this.repository = options.repository;
@@ -98,6 +163,9 @@ export class RepositoryMonitorService {
     this.report = options.report;
     this.logger = options.logger.child("repository-monitor");
     this.now = options.now ?? (() => new Date());
+    // Defaulted to the fifteen-minute cadence the deployment ships with, so a caller that
+    // does not know the interval still keeps the same number of readings of history.
+    this.retentionHours = retentionHours(options.intervalMinutes ?? 15);
   }
 
   /** The `owner/repo` name the probe is configured with. */
@@ -148,9 +216,17 @@ export class RepositoryMonitorService {
 
     // Stored before they are reported: an announcement that cannot find its commit
     // in the table on a retry would be announced a second time.
+    //
+    // The merge window goes through the same upsert, in the same call: it is a third
+    // *view* of pull requests the first two may already hold, and upserting by number
+    // means a merge it carries is written to the row the created window made.
+    const merges = reading.recentlyMerged;
     const [commitShas, pullResult] = await Promise.all([
       this.repository.upsertCommits(record.id, reading.commits),
-      this.repository.upsertPullRequests(record.id, reading.pullRequests),
+      this.repository.upsertPullRequests(
+        record.id,
+        merges.length === 0 ? reading.pullRequests : [...reading.pullRequests, ...merges],
+      ),
     ]);
 
     const state = toReportedState(reading);
@@ -164,6 +240,7 @@ export class RepositoryMonitorService {
       // Both pull-request windows are counted: `pullCount` says how many rows the
       // reading held, not how many fit in one window.
       pullCount: reading.pullRequests.length,
+      merges,
       failures,
     });
     await this.repository.saveSyncState(record.id, {
@@ -219,6 +296,30 @@ export class RepositoryMonitorService {
   }
 
   /**
+   * Everything `/github report` needs for one window, read in two queries.
+   *
+   * Returned together rather than through three getters so the report cannot mix
+   * windows: the snapshots, the pull requests and their wall-clock bounds all describe
+   * the same `[from, to]`, and a caller that assembled them itself could pick two.
+   *
+   * @param from the oldest instant included.
+   * @param to the newest instant included; defaults to now, not to the newest snapshot,
+   * so a report says "the last 4 hours" even if the monitor has been down for three
+   * of them — the gap is then visible in the data instead of hidden by the bounds.
+   */
+  public async reportWindow(from: Date, to: Date = this.now()): Promise<ReportWindow> {
+    const record = await this.ensureWatched();
+    // All three reads are bounded, so a report is a bounded amount of work whatever
+    // range it is asked for.
+    const [snapshots, pullRequests, commits] = await Promise.all([
+      this.repository.snapshotsBetween(record.id, from, to, REPORT_SNAPSHOT_ROWS),
+      this.repository.pullRequestsBetween(record.id, from, to, REPORT_PULL_ROWS),
+      this.repository.commitsBetween(record.id, from, to, REPORT_COMMIT_ROWS),
+    ]);
+    return { from, to, snapshots, pullRequests, commits };
+  }
+
+  /**
    * The pull requests the last refresh stored, newest created first.
    *
    * `/github status` renders a snapshot, so it reads this rather than the network:
@@ -234,7 +335,10 @@ export class RepositoryMonitorService {
 
   /** Deletes snapshots beyond the retention window. */
   private async prune(repositoryId: string): Promise<void> {
-    const cutoff = new Date(this.now().getTime() - SNAPSHOT_RETENTION * 3_600_000);
+    // Kept as hours, not rows: the storage port prunes by date, and a count here would
+    // mean reading every row back to find the cutoff. `SNAPSHOT_RETENTION` is the count
+    // that window is sized from, so the two cannot drift apart.
+    const cutoff = new Date(this.now().getTime() - this.retentionHours * 3_600_000);
     const removed = await this.repository.pruneSnapshots(repositoryId, cutoff);
     if (removed > 0) {
       this.logger.debug("Pruned old repository snapshots", { repositoryId, removed });

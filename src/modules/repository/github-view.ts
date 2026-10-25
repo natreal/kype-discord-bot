@@ -20,6 +20,7 @@ import {
   decompose,
   implementationPoints,
   lastComparableIndex,
+  libraryMovement,
   readImplementation,
   readLibraries,
   round2,
@@ -28,6 +29,7 @@ import {
   type ImplementationReading,
   type ImplementationSeries,
   type LibraryAnalysis,
+  type LibraryMovementRow,
   type LibraryReading,
   type SeriesPoint,
   type TrendSummary,
@@ -43,15 +45,6 @@ import {
 } from "./repository-chart.js";
 import { formatCount } from "./repository.events.js";
 
-/** Characters Discord allows in one embed field before it truncates. */
-/**
- * The most text one block of a reply may hold.
- *
- * Raised from 1024 when the panels moved to Components V2: an embed field capped at
- * 1024 characters, so the library table had to be split into 1024-character pages and
- * the overview had to drop sections past its twenty-fifth field. A text block has no
- * such grid, so the table now pages on its own size instead of the embed's.
- */
 /**
  * The most text one block of a reply may hold.
  *
@@ -628,6 +621,10 @@ function librariesPanel(context: GithubContext): Omit<ViewBlock, "footer">[] {
     (library) => library.total > 0 && library.done >= library.total,
   );
   const share = total > 0 ? (done / total) * 100 : 0;
+  // Movement over the whole stored window, not just against one earlier reading: a
+  // library that gained work six hours ago and none since looked untouched when the
+  // panel only compared the newest two readings.
+  const movement = libraryMovement(context.history);
 
   const description = body(
     [
@@ -652,7 +649,7 @@ function librariesPanel(context: GithubContext): Omit<ViewBlock, "footer">[] {
   // of every page.
   const rows = ordered.map((library) => ({
     library,
-    text: libraryRow(library, analysis.before),
+    text: libraryRow(library, analysis.before, movement),
   }));
   const pages = paginate(rows, MAX_FIELD);
 
@@ -673,15 +670,31 @@ function librariesPanel(context: GithubContext): Omit<ViewBlock, "footer">[] {
   }));
 }
 
-/** @returns one library's table row: a labelled gauge, then the numbers. */
-function libraryRow(library: LibraryReading, before: readonly LibraryReading[]): string {
+/**
+ * @returns one library's table row: a labelled gauge, then the numbers.
+ *
+ * The change is measured over the whole stored window when there is one, which is what
+ * makes the column useful: the delta against the single previous reading was usually
+ * `▬`, so a reader could not tell a library that had been worked on yesterday from one
+ * nobody had ever touched.
+ */
+function libraryRow(
+  library: LibraryReading,
+  before: readonly LibraryReading[],
+  window: readonly LibraryMovementRow[] = [],
+): string {
+  const moved = window.find((row) => row.name === library.name);
   const earlier = before.find((candidate) => candidate.name === library.name);
   const delta =
-    earlier === undefined
-      ? "🆕"
-      : library.done === earlier.done
+    moved === undefined
+      ? earlier === undefined
+        ? "🆕"
+        : library.done === earlier.done
+          ? "▬"
+          : `${library.done > earlier.done ? "+" : ""}${formatCount(library.done - earlier.done)}`
+      : moved.doneDelta === 0 && moved.totalDelta === 0
         ? "▬"
-        : `${library.done > earlier.done ? "+" : ""}${formatCount(library.done - earlier.done)}`;
+        : `${moved.doneDelta > 0 ? "+" : ""}${formatCount(moved.doneDelta)} window`;
   return body([
     `\`${clip(library.label, 24).padEnd(24, " ")}\` ${gauge(library.percent / 100, 8)}`,
     ` ${formatValue(library.percent, 2).padStart(6, " ")}% · \`${formatCount(library.done)}/${formatCount(library.total)}\` · ${delta}`,
@@ -739,29 +752,49 @@ export function chunk<T>(items: readonly T[], size: number): T[][] {
  * is bad news.
  */
 function timelinePanel(context: GithubContext): Omit<ViewBlock, "footer">[] {
-  const history = trimmedHistory(context, 15);
+  const history = trimmedHistory(context, TIMELINE_ROWS);
   const summary = summarize(seriesFor(context, "libraries"));
 
+  // Stored oldest first, drawn newest first: the step is still the change from the
+  // previous reading, so it is read before the rows are flipped for display.
   const rows = history.map((snapshot, index) => {
     const reading = readImplementation(snapshot);
     const earlier = history[index - 1];
     const before = earlier === undefined ? null : readImplementation(earlier).libraries;
+    // A step is always rendered, even when there is none: `body()` drops empty lines, so
+    // a missing step used to collapse that row to two lines and every row with one to
+    // three — a table that alternated height and misaligned its columns.
     const step =
       reading.libraries === null || before === null
-        ? ""
+        ? "     ·"
         : reading.libraries.done === before.done
-          ? " ▬"
+          ? "     ▬"
           : ` ${reading.libraries.done > before.done ? "+" : ""}${formatCount(reading.libraries.done - before.done)}`;
-    return body([
-      `\`${absoluteTime(snapshot.capturedAt).slice(5, 16).padEnd(12, " ")}\``,
-      `${(reading.libraries === null ? "—" : `${formatValue(reading.libraries.percent, 2)}%`).padStart(7, " ")}`,
-      `${(reading.shaders === null ? "—" : `${formatValue(reading.shaders.percent, 2)}%`).padStart(7, " ")}${step}`,
-    ]);
+    // `absoluteTime(...).slice(5, 16)` is 16 characters (`MM-DD HH:MM UTC`), so the
+    // lane is padded to exactly that and one space separates it from the percentages.
+    return (
+      `${absoluteTime(snapshot.capturedAt).slice(5, 16)} ` +
+      `${(reading.libraries === null ? "      —" : `${formatValue(reading.libraries.percent, 2).padStart(7, " ")}%`)}` +
+      `${(reading.shaders === null ? "      —" : `${formatValue(reading.shaders.percent, 2).padStart(7, " ")}%`)}` +
+      ` ${step.padStart(6, " ")}`
+    );
   });
+  rows.reverse();
+
+  // The span the rows actually cover, so "the last 24 readings" says what it is worth:
+  // at fifteen-minute cadence that is six hours, and the reader should not have to work
+  // that out from the row count.
+  const oldest = history[0];
+  const newest = history.at(-1);
+  const span =
+    oldest === undefined || newest === undefined
+      ? null
+      : (newest.capturedAt.getTime() - oldest.capturedAt.getTime()) / 3_600_000;
 
   const description = body(
     [
-      `🕘 The last **${history.length}** readings, newest first.`,
+      `🕘 The last **${history.length}** readings, newest first` +
+        (span === null ? "." : ` — ${formatSpan(span)} of history.`),
       summary === null
         ? "▬ no reading carries a percentage yet"
         : `📚 from **${formatValue(summary.first.value, 2)}%** to **${formatValue(summary.last.value, 2)}%** — ${movement(summary.change)}`,
@@ -777,14 +810,17 @@ function timelinePanel(context: GithubContext): Omit<ViewBlock, "footer">[] {
       color: colourFor(summary?.change ?? null),
       sections: [
         {
-          heading: "🕘 When · libraries · shaders · implemented step",
-          text: body(rows.reverse()),
+          heading: "🕘 When (UTC) · libraries · shaders · implemented step",
+          text: body(rows),
         },
         ...(summary === null ? [] : [stepsSection(summary)]),
       ],
     },
   ];
 }
+
+/** Readings the timeline lists. Enough to show the recent past without paging. */
+const TIMELINE_ROWS = 24;
 
 /** @returns how often the reading went up, down or stayed put. */
 function stepsSection(summary: TrendSummary): ViewSection {

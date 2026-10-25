@@ -324,6 +324,65 @@ export function readLibraries(snapshot: SnapshotRecord | null): LibraryReading[]
 }
 
 /**
+ * One library's movement between two snapshots, matched by name.
+ *
+ * A separate type from {@link LibraryReading} because it answers a different question:
+ * a reading is "where it stands", a movement is "what changed". Keeping them apart is
+ * what lets the libraries panel and `/github report` share one computation instead of
+ * each growing its own.
+ */
+export interface LibraryMovementRow {
+  readonly name: string;
+  readonly label: string;
+  readonly done: number;
+  readonly total: number;
+  readonly percent: number;
+  /** Functions implemented over the window. */
+  readonly doneDelta: number;
+  /** Change in the denominator: a positive figure is newly discovered functions. */
+  readonly totalDelta: number;
+  readonly percentDelta: number;
+}
+
+/**
+ * @returns per-library movement between the first and last readings that carry a table.
+ *
+ * Matched by name, never by position, for the reason {@link analyzeLibraries} states.
+ * A library absent from the first table is reported with its whole count as its
+ * movement, which is the honest reading: the monitor did not know it existed then.
+ *
+ * An empty array when no reading carries a table, so a caller can print "no table"
+ * rather than a page of zeroes.
+ */
+export function libraryMovement(snapshots: readonly SnapshotRecord[]): LibraryMovementRow[] {
+  const tables = snapshots
+    .map((snapshot) => snapshot.progress?.libraries.groups ?? [])
+    .filter((groups) => groups.length > 0);
+  const before = new Map((tables[0] ?? []).map((group) => [group.name, group]));
+  const last = tables.at(-1) ?? [];
+  const rows: LibraryMovementRow[] = last.map((group) => {
+    const earlier = before.get(group.name);
+    return {
+      name: group.name,
+      label: group.label,
+      done: group.done,
+      total: group.total,
+      percent: group.percent,
+      doneDelta: earlier === undefined ? group.done : group.done - earlier.done,
+      totalDelta: earlier === undefined ? group.total : group.total - earlier.total,
+      percentDelta: earlier === undefined ? group.percent : round2(group.percent - earlier.percent),
+    };
+  });
+  // Most work first, then by label so two equal rows keep a stable order between runs.
+  return rows.sort(
+    (left, right) =>
+      right.doneDelta - left.doneDelta ||
+      right.percentDelta - left.percentDelta ||
+      left.label.localeCompare(right.label),
+  );
+}
+
+/**
  * Compares two readings, library by library.
  *
  * Libraries are matched by **name**, not by position: the published document

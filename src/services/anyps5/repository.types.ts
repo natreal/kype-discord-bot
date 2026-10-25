@@ -30,6 +30,8 @@ export interface RepositoryPullRequest {
   readonly merged: boolean;
   readonly createdAt: Date;
   readonly mergedAt: Date | null;
+  /** When it stopped being open, merged or not; `null` when GitHub did not say. */
+  readonly closedAt: Date | null;
   readonly url: string;
 }
 
@@ -63,6 +65,16 @@ export interface RepositoryReading {
    * needed — the first carries openings, the second carries merges.
    */
   readonly pullRequests: readonly RepositoryPullRequest[];
+  /**
+   * Recently merged pull requests, newest merge first — the only window that can
+   * date a merge.
+   *
+   * Kept apart from `pullRequests` rather than merged into it: `pullRequests` is a
+   * row store whose order and size the views depend on, while this is a *time*
+   * window. `/github report` tallies merges by `mergedAt`, and a pull request created
+   * ten days ago that merged an hour ago is invisible to a newest-created window.
+   */
+  readonly recentlyMerged: readonly RepositoryPullRequest[];
   /** When the reading was taken. */
   readonly fetchedAt: Date;
 }

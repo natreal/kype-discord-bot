@@ -35,6 +35,14 @@ const MAX_PROGRESS_BYTES = 2_000_000;
 export const COMMIT_WINDOW = 50;
 /** How many pull requests one reading keeps, newest first. */
 export const PULL_REQUEST_WINDOW = 30;
+/**
+ * How many recently merged pull requests one reading keeps.
+ *
+ * Larger than the row windows because the list is filtered twice (closed *and*
+ * merged) and is ordered by last update, not by merge. One page: the client does not
+ * paginate, so anything above GitHub's 100-per-page ceiling would be silently capped.
+ */
+export const MERGED_WINDOW = 100;
 
 /** Repository coordinates, from configuration rather than hard-coded. */
 export interface RepositoryTarget {
@@ -108,11 +116,12 @@ export class RepositoryProbe {
     // Sequential where it costs nothing and parallel where it saves a round trip:
     // the branch is only known after the repository call, and the others are
     // independent of each other.
-    const [progress, commits, pullRequests, closedPullRequests] = await Promise.all([
+    const [progress, commits, pullRequests, closedPullRequests, closedMerges] = await Promise.all([
       this.readProgress(),
       this.readCommits(branch, cache.commitsEtag),
       this.readPullRequests(cache.pullRequestsEtag),
       this.readClosedPullRequests(),
+      this.readRecentlyMerged(),
     ]);
 
     const failures = [
@@ -123,7 +132,6 @@ export class RepositoryProbe {
       // way, and an operator reading the snapshot does not need to know which half.
       ...(pullRequests.entries === null || closedPullRequests === null ? ["pull-requests"] : []),
     ];
-
     return {
       reading: {
         facts: facts ?? fallbackFacts(this.fullName),
@@ -132,6 +140,7 @@ export class RepositoryProbe {
         progressCommit: progress.commit,
         commits: commits.entries ?? [],
         pullRequests: mergePullRequests(pullRequests.entries ?? [], closedPullRequests ?? []),
+        recentlyMerged: closedMerges ?? [],
         fetchedAt: this.now(),
       },
       cache: {
@@ -300,6 +309,49 @@ export class RepositoryProbe {
     const body = result.response.body;
     return Array.isArray(body) ? body.flatMap(toPullRequest) : null;
   }
+
+  /**
+   * Fetches the pull requests merged most recently, newest merge first.
+   *
+   * A separate window from {@link readClosedPullRequests} for a reason that is about
+   * *time*, not about state: `sort=updated` orders by the last write, so a quiet week
+   * pushes Friday's merges down under every later comment and close. This window is
+   * the only one whose size is spent on merges, which is what a report over the last
+   * day, or the last six hours, has to count.
+   *
+   * A merged pull request is also *closed*, so `state=closed` is the correct filter:
+   * GitHub offers no `sort=merged`, and merging sets `closed_at` and `merged_at` to
+   * the same instant, which makes the closed window an ordered stand-in for it.
+   *
+   * Sized larger than the other windows because it is filtered twice — closed *and*
+   * merged — and a busy repository closes pull requests without merging all day.
+   */
+  private async readRecentlyMerged(): Promise<readonly RepositoryPullRequest[] | null> {
+    // No `ETag`: a conditional request would answer `304` for the exact change this
+    // window exists to find, and the state it would compare against lives in a cache
+    // the next reading is handed, not in the window's own order. One unconditional call
+    // per refresh is the price of a merge the report can date.
+    const result = await this.client.request({
+      path: `${repositoryPath(this.target)}/pulls`,
+      query: {
+        state: "closed",
+        sort: "updated",
+        direction: "desc",
+        per_page: MERGED_WINDOW,
+      },
+    });
+    if (!result.ok || result.response.notModified) {
+      return null;
+    }
+    const body = result.response.body;
+    if (!Array.isArray(body)) {
+      return null;
+    }
+    const merged = body.flatMap(toPullRequest).filter((pull) => pull.merged);
+    return [...merged].sort(
+      (left, right) => (right.mergedAt?.getTime() ?? 0) - (left.mergedAt?.getTime() ?? 0),
+    );
+  }
 }
 
 /**
@@ -405,6 +457,9 @@ function toPullRequest(value: unknown): RepositoryPullRequest[] {
       merged: mergedAt !== null,
       createdAt,
       mergedAt,
+      // GitHub sets `closed_at` for both outcomes, so a pull request closed without
+      // merging still has a moment. `/github report` needs it to bucket closures.
+      closedAt: asDate(row["closed_at"]),
       url: typeof row["html_url"] === "string" ? row["html_url"] : "",
     },
   ];

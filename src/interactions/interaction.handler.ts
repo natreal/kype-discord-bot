@@ -80,6 +80,14 @@ import {
   parsePanelCustomId,
   renderView,
 } from "../modules/repository/index.js";
+import {
+  parseReportCustomId,
+  renderReport,
+} from "../modules/repository/github-report.view.js";
+import {
+  buildReportStats,
+  reportWindowFor,
+} from "../modules/repository/repository-report.analytics.js";
 
 /**
  * Snapshots read per `/github` render, matching the command's own window.
@@ -483,6 +491,12 @@ export class InteractionHandler {
       return;
     }
     if (isGithubComponent(customId)) {
+      // Report pages first: their IDs share the `github:` prefix, so the panel route
+      // would refuse them as malformed and answer "this panel is out of date".
+      if (parseReportCustomId(customId) !== null) {
+        await this.handleGithubReportPage(interaction);
+        return;
+      }
       await this.handleGithubPanel(interaction);
       return;
     }
@@ -546,6 +560,60 @@ export class InteractionHandler {
         customId: interaction.customId,
       });
       await this.safeReply(interaction, "That panel could not be loaded. Try `/github` again.");
+    }
+  }
+
+  /**
+   * `github:report:<page>:<range>` — redraw a `/github report` on another page.
+   *
+   * The same contract as {@link handleGithubPanel}: edited in place, with the page and
+   * the window carried in the custom ID, so no session is tracked and a message from
+   * last week still pages correctly after a restart.
+   */
+  private async handleGithubReportPage(
+    interaction: ButtonInteraction | StringSelectMenuInteraction,
+  ): Promise<void> {
+    const request = parseReportCustomId(interaction.customId);
+    const monitor = this.deps.repositoryMonitor;
+    if (request === null || !monitor) {
+      await this.safeReply(interaction, "This report is out of date. Run `/github report` again.");
+      return;
+    }
+
+    await interaction.deferUpdate();
+    try {
+      // The window is recomputed from the range rather than stored: a page opened an
+      // hour after the message was sent reports the last N hours from *now*, which is
+      // what a reader pressing "1 day" on an old message is asking for.
+      const window = reportWindowFor(request.range, new Date());
+      const data = await monitor.reportWindow(window.from, window.to);
+      const stats = buildReportStats({
+        rangeId: request.range,
+        window: { from: data.from, to: data.to },
+        snapshots: data.snapshots,
+        pullRequests: data.pullRequests,
+        commits: data.commits.map((commit) => ({
+          at: commit.committedAt,
+          author: commit.author,
+          message: commit.message,
+        })),
+      });
+      await interaction.editReply({
+        components: renderView(
+          renderReport({
+            stats,
+            fullName: monitor.fullName,
+            repoUrl: `https://github.com/${monitor.fullName}`,
+            page: request.page,
+          }),
+        ).components,
+        flags: MessageFlags.IsComponentsV2,
+      });
+    } catch (error) {
+      this.logger.error("Failed to render a /github report page", error, {
+        customId: interaction.customId,
+      });
+      await this.safeReply(interaction, "That report page could not be loaded. Try `/github report` again.");
     }
   }
 

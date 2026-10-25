@@ -30,6 +30,18 @@ const optionalString = z
   .transform((value) => (value === "" ? undefined : value))
   .optional();
 
+/** @returns the shortest cadence the anonymous limit can serve, in minutes. */
+function anonymousFloorMinutes(): number {
+  // Strictly fewer requests than the limit: a cadence landing exactly on 60 an hour
+  // fails its last refresh, so the search is for the first interval that stays under.
+  for (let minutes = 1; minutes <= 1_440; minutes += 1) {
+    if ((60 / minutes) * GITHUB_REQUESTS_PER_REFRESH < GITHUB_ANONYMOUS_HOURLY_LIMIT) {
+      return minutes;
+    }
+  }
+  return 1_441;
+}
+
 /** Deployment scopes a command deployment may target. */
 export const DEPLOY_SCOPES = ["global", "global+guilds", "dev-guild"] as const;
 
@@ -204,13 +216,25 @@ export const envSchema = z.object({
    */
   GITHUB_TOKEN: optionalString.describe("Optional GitHub token; raises the rate limit to 5,000/h."),
 
-  /** Minutes between refreshes. The default matches AnyPS5's own CI cadence. */
+  /**
+   * Minutes between refreshes.
+   *
+   * The default is fifteen, not the hour this monitor started with. GitHub dates every
+   * commit, pull request and merge, so the snapshot's cadence is no longer what gives
+   * the history its resolution — a finer snapshot chiefly makes the *percentage* series
+   * finer, which is what `/github report` charts.
+   *
+   * The `superRefine` below is the part that matters: without a token GitHub allows 60
+   * requests an hour, and one refresh costs six. Any cadence under ten minutes would
+   * exhaust that allowance on the refresh alone and start failing, so an unauthenticated
+   * deployment is refused at startup rather than degraded silently at 3 a.m.
+   */
   GITHUB_POLL_INTERVAL_MINUTES: z.coerce
     .number()
     .int()
     .min(1)
     .max(1_440)
-    .default(60)
+    .default(15)
     .describe("How often the repository monitor refreshes, in minutes."),
 
   /**
@@ -223,7 +247,39 @@ export const envSchema = z.object({
   GITHUB_REPORT_CHANNEL_ID: optionalString
     .pipe(snowflake.optional())
     .describe("Discord channel that receives the hourly repository report."),
+}).superRefine((env, context) => {
+  // Unauthenticated GitHub answers 60 requests an hour, and a refresh spends five GitHub
+  // calls (the Pages file is a different host and free). A `304` for an unchanged window
+  // saves quota, but the merge window is unconditional, so the cadence cannot rely on it.
+  if (env.GITHUB_TOKEN !== undefined && env.GITHUB_TOKEN.length > 0) {
+    return;
+  }
+  const needed = (60 / env.GITHUB_POLL_INTERVAL_MINUTES) * GITHUB_REQUESTS_PER_REFRESH;
+  // `>=`, not `>`: a limit of 60 allows requests 1..60 and rejects the 61st, so a cadence
+  // landing exactly on 60 loses its last refresh every hour — a failing endpoint every
+  // hour is worse than a startup error, because it looks like a GitHub outage.
+  if (needed >= GITHUB_ANONYMOUS_HOURLY_LIMIT) {
+    context.addIssue({
+      code: "custom",
+      path: ["GITHUB_POLL_INTERVAL_MINUTES"],
+      message:
+        `refreshing every ${env.GITHUB_POLL_INTERVAL_MINUTES}m needs ${Math.ceil(needed)} ` +
+        `requests an hour, and unauthenticated GitHub allows ${GITHUB_ANONYMOUS_HOURLY_LIMIT}. ` +
+        `Set GITHUB_TOKEN (5,000/hour), or an interval of ${anonymousFloorMinutes()}m or more.`,
+    });
+  }
 });
+
+/**
+ * Requests one monitor refresh spends.
+ *
+ * Five GitHub calls: the repository, the commits, and three pull-request windows. The
+ * sixth source — the project's published `progress.json` — is on its Pages host, which
+ * has no rate limit at all, so it costs nothing here.
+ */
+export const GITHUB_REQUESTS_PER_REFRESH = 5;
+/** Hourly requests GitHub allows without a token. */
+export const GITHUB_ANONYMOUS_HOURLY_LIMIT = 60;
 
 /** Parsed, validated environment variables. */
 export type Env = z.output<typeof envSchema>;

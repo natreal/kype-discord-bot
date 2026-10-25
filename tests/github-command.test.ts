@@ -31,10 +31,22 @@ import {
   type LibraryReading,
 } from "../../src/modules/repository/index.js";
 import {
+  bucketEdges,
+  bucketHoursFor,
+  buildReportStats,
+  reportWindowFor,
+} from "../../src/modules/repository/repository-report.analytics.js";
+import {
+  parseReportCustomId,
+  renderReport,
+} from "../../src/modules/repository/github-report.view.js";
+import type { RepositoryPullRequest } from "../../src/services/anyps5/repository.types.js";
+import {
   MAX_FIELD,
   panelCustomId,
   parsePanelCustomId,
   isGithubComponent,
+  absoluteTime,
 } from "../../src/modules/repository/github-view.js";
 import { renderView } from "../../src/modules/repository/github-components.js";
 import { ComponentType } from "discord.js";
@@ -686,6 +698,80 @@ describe("buildGithubView — why the share moved", () => {
   });
 });
 
+describe("buildGithubView — timeline and library movement", () => {
+  /** @returns a context for one panel over the given history. */
+  function context(history: readonly SnapshotRecord[], panel: GithubPanel) {
+    return {
+      fullName: "anyps5/anyps5",
+      repoUrl: "https://github.com/anyps5/anyps5",
+      history,
+      latest: history.at(-1) ?? null,
+      panel,
+      style: "line" as const,
+      width: 16,
+      ownerId: null,
+    };
+  }
+
+  it("draws the timeline as a table with one line per reading", () => {
+    // The bug this pins: a row with no step used to lose its step line to `body()`,
+    // which drops empty strings, so it rendered two lines while every row with a step
+    // rendered three — a table whose columns drifted row by row.
+    const history = [
+      snapshot(3, { done: 1_000, total: 6_000, percent: 16.67 }),
+      snapshot(2, { done: 1_010, total: 6_000, percent: 16.83 }),
+      // Unchanged, so its step is `▬` rather than `+10`.
+      snapshot(1, { done: 1_010, total: 6_000, percent: 16.83 }),
+      // No reading at all: the row must still keep its shape.
+      snapshot(0, null),
+    ];
+    const view = buildGithubView(context(history, "timeline"));
+    const rows = (view.blocks[0]?.sections[0]?.text ?? "").split("\n");
+
+    expect(rows).toHaveLength(history.length);
+    for (const row of rows) {
+      expect(row).not.toBe("");
+      // `MM-DD HH:MM`, then a percentage or an em dash for "no reading", then a step:
+      // the same fields in the same lanes on every row, which is the point.
+      expect(row).toMatch(/^\d{2}-\d{2} \d{2}:\d{2} +(\d+\.\d\d%|—) +(\d+\.\d\d%|—) +\S+/);
+    }
+    // Newest first: the newest reading is the one dated today, and the oldest is last.
+    expect(rows[0]?.slice(0, 11)).toBe(absoluteTime(daysAgo(0)).slice(5, 16));
+    expect(rows.at(-1)?.slice(0, 11)).toBe(absoluteTime(daysAgo(3)).slice(5, 16));
+    expect(view.blocks[0]?.description).toContain("of history");
+  });
+
+  it("measures a library's change over the whole window, not the last step", () => {
+    // "gpu" gained its work two readings ago and nothing since. Comparing only the
+    // newest pair would report it as unchanged, which is the "libraries is broken" bug.
+    const history = [
+      snapshot(2, { done: 1_000, total: 6_000, percent: 16.67 }, [
+        group("gpu", 900, 5_000),
+        group("audio", 100, 1_000),
+      ]),
+      snapshot(1, { done: 1_050, total: 6_000, percent: 17.5 }, [
+        group("gpu", 950, 5_000),
+        group("audio", 100, 1_000),
+      ]),
+      snapshot(0, { done: 1_050, total: 6_000, percent: 17.5 }, [
+        group("gpu", 950, 5_000),
+        group("audio", 100, 1_000),
+      ]),
+    ];
+    const view = buildGithubView(context(history, "libraries"));
+    const text = view.blocks
+      .map((block) => block.sections)
+      .reduce<{ heading: string; text: string }[]>((all, sections) => all.concat(sections), [])
+      .map((section) => section.text)
+      .join("\n");
+
+    // 50 functions over the window, stated as such.
+    expect(text).toContain("+50 window");
+    // "audio" did not move, so it is marked unchanged rather than given a delta.
+    expect(text).toContain("▬");
+  });
+});
+
 describe("panel custom IDs", () => {
   it("round-trips every panel and style", () => {
     for (const panel of ["overview", "libraries", "timeline", "graph", "why"] as const) {
@@ -711,5 +797,224 @@ describe("panel custom IDs", () => {
     expect(parsePanelCustomId("github:panel:graph:line")).toBeNull();
     expect(parsePanelCustomId("github:panel:graph:line:24:extra")).toBeNull();
     expect(parsePanelCustomId("ticket:panel:graph:line:24")).toBeNull();
+  });
+});
+
+describe("/github report", () => {
+  /** One pull request, with the three timestamps the report buckets by. */
+  function pull(
+    number: number,
+    input: {
+      readonly createdAt: Date;
+      readonly mergedAt?: Date | null;
+      readonly closedAt?: Date | null;
+      readonly draft?: boolean;
+    },
+  ): RepositoryPullRequest {
+    const closedAt = input.closedAt ?? null;
+    return {
+      number,
+      title: `Refactor #${number}`,
+      author: "Retr0G28",
+      state: closedAt === null ? "open" : "closed",
+      draft: input.draft ?? false,
+      merged: input.mergedAt !== undefined && input.mergedAt !== null,
+      createdAt: input.createdAt,
+      mergedAt: input.mergedAt ?? null,
+      closedAt,
+      url: `https://github.com/anyps5/anyps5/pull/${number}`,
+    };
+  }
+
+  const END = new Date("2026-10-23T12:00:00.000Z");
+  /** @returns `hours` before {@link END}. */
+  function hoursBefore(hours: number): Date {
+    return new Date(END.getTime() - hours * 3_600_000);
+  }
+
+  /** A 4-hour window with two readings and three pull requests. */
+  function fixture() {
+    // `capturedAt` is written after the spread, because `snapshot()` dates every row
+    // from its own clock and a report is about a window: the readings have to sit in it.
+    const at = (row: SnapshotRecord, when: Date): SnapshotRecord => ({ ...row, capturedAt: when });
+    const snapshots = [
+      at(snapshot(0, { done: 40, total: 100, percent: 40 }, [group("gpu", 30, 80), group("audio", 10, 20)]), hoursBefore(4)),
+      at(snapshot(0, { done: 46, total: 100, percent: 46 }, [group("gpu", 36, 80), group("audio", 10, 20)]), END),
+    ];
+    const pulls = [
+      // Opened and merged inside the window, two hours to merge.
+      pull(1, { createdAt: hoursBefore(3), mergedAt: hoursBefore(1), closedAt: hoursBefore(1) }),
+      // Opened inside it and still open.
+      pull(2, { createdAt: hoursBefore(2) }),
+      // Closed without merging inside it.
+      pull(3, { createdAt: hoursBefore(4), closedAt: hoursBefore(1) }),
+    ];
+    return { snapshots, pulls };
+  }
+
+  /** @returns the stats for the fixture above. */
+  function statsFor(rangeId = "4h") {
+    const data = fixture();
+    return buildReportStats({
+      rangeId,
+      window: { from: hoursBefore(4), to: END },
+      snapshots: data.snapshots,
+      pullRequests: data.pulls,
+      commits: [
+        { at: hoursBefore(3.5), author: "ann", message: "gpu: add dispatch" },
+        { at: hoursBefore(2.5), author: "ann", message: "gpu: fix dispatch" },
+        { at: hoursBefore(1.5), author: "bob", message: "audio: tidy" },
+      ],
+    });
+  }
+
+  it("counts what happened in the window, not what happened to be fetched", () => {
+    const stats = statsFor();
+
+    expect(stats.pulls.opened).toBe(3);
+    expect(stats.pulls.merged).toBe(1);
+    expect(stats.pulls.closedUnmerged).toBe(1);
+    expect(stats.pulls.stillOpen).toBe(1);
+    // Two hours from creation to merge, which is the interval a reviewer feels.
+    expect(stats.pulls.medianMergeHours).toBe(2);
+    expect(stats.pulls.meanMergeHours).toBe(2);
+    expect(stats.pulls.mergeRate).toBe(0.5);
+    expect(stats.commits.count).toBe(3);
+    expect(stats.commits.authors.map((author) => author.name)).toEqual(["ann", "bob"]);
+  });
+
+  it("reads the implementation change from the first and last reading", () => {
+    const stats = statsFor();
+
+    expect(stats.progress.first?.percent).toBe(40);
+    expect(stats.progress.last?.percent).toBe(46);
+    expect(stats.progress.percentDelta).toBe(6);
+    expect(stats.progress.doneDelta).toBe(6);
+    expect(stats.progress.totalDelta).toBe(0);
+    // Four hours is a sixth of a day, so +6 pp over it is +36 pp/day.
+    expect(stats.progress.perDay).toBe(36);
+  });
+
+  it("attributes movement per library, by name", () => {
+    const stats = statsFor();
+    const gpu = stats.libraries.find((row) => row.name === "gpu");
+    const audio = stats.libraries.find((row) => row.name === "audio");
+
+    // The six functions went into "gpu", so it is listed first — most work first.
+    expect(stats.libraries[0]?.name).toBe("gpu");
+    expect(gpu?.doneDelta).toBe(6);
+    expect(gpu?.percentDelta).toBe(7.5);
+    expect(audio?.doneDelta).toBe(0);
+    expect(audio?.percentDelta).toBe(0);
+  });
+
+  it("buckets the window hourly and places each event by its own timestamp", () => {
+    const stats = statsFor();
+    const edges = bucketEdges(hoursBefore(4), END, bucketHoursFor(4));
+
+    expect(edges).toHaveLength(4);
+    expect(stats.buckets).toHaveLength(4);
+    expect(stats.buckets[0]?.startsAt.toISOString()).toBe(hoursBefore(4).toISOString());
+    // One opening landed in each of the first three hours.
+    expect(stats.buckets.map((bucket) => bucket.opened)).toEqual([1, 1, 1, 0]);
+    // The merge and the unmerged close both happened in the last hour.
+    expect(stats.buckets.map((bucket) => bucket.merged)).toEqual([0, 0, 0, 1]);
+    expect(stats.buckets.map((bucket) => bucket.closedUnmerged)).toEqual([0, 0, 0, 1]);
+  });
+
+  it("uses six-hour buckets beyond a day, so a week is readable", () => {
+    expect(bucketHoursFor(24)).toBe(1);
+    expect(bucketHoursFor(72)).toBe(6);
+    expect(bucketEdges(hoursBefore(24), END, bucketHoursFor(168))).toHaveLength(4);
+  });
+
+  it("never reports a missing rate as zero", () => {
+    const stats = buildReportStats({
+      rangeId: "4h",
+      window: { from: hoursBefore(4), to: END },
+      // A watch with a reading but nothing that resolved in the window.
+      snapshots: [snapshot(0, { done: 40, total: 100, percent: 40 })],
+      pullRequests: [],
+      commits: [],
+    });
+
+    // Nothing merged, so there is no review time to state — and `null` says that,
+    // whereas `0` would claim pull requests merged instantly.
+    expect(stats.pulls.medianMergeHours).toBeNull();
+    expect(stats.pulls.meanMergeHours).toBeNull();
+    expect(stats.pulls.mergeRate).toBeNull();
+    // One reading cannot have a rate, only a position.
+    expect(stats.progress.percentDelta).toBeNull();
+    expect(stats.progress.perDay).toBeNull();
+  });
+
+  it("states how much of the window was actually recorded", () => {
+    const stats = statsFor();
+
+    expect(stats.coverage.snapshots, "snapshots").toBe(2);
+    // Readings four hours apart, so the inferred cadence is four hours.
+    expect(stats.coverage.cadenceMinutes, "cadence").toBe(240);
+    // Two of four hours hold a reading: the share qualifies every rate on the page.
+    expect(stats.coverage.hoursCovered, "covered").toBe(2);
+    expect(stats.coverage.share).toBe(0.5);
+    expect(stats.coverage.longestGapHours).toBe(4);
+  });
+
+  it("renders every page as one block inside the text budget", () => {
+    const stats = statsFor();
+    for (const page of ["overview", "activity", "libraries", "health"] as const) {
+      const view = renderReport({
+        stats,
+        fullName: "anyps5/anyps5",
+        repoUrl: "https://github.com/anyps5/anyps5",
+        page,
+      });
+      expect(view.blocks).toHaveLength(1);
+      const block = view.blocks[0];
+      expect(block?.title).toContain("report");
+      expect(block?.footer.length).toBeGreaterThan(0);
+      // The model keeps every section inside the budget, so the split `renderView`
+      // performs happens on a row boundary rather than in the middle of a table.
+      for (const section of block?.sections ?? []) {
+        expect(section.text.length).toBeLessThanOrEqual(MAX_FIELD);
+      }
+      expect(renderView(view).components.length).toBeGreaterThan(1);
+    }
+  });
+
+  it("marks the open page and keeps the range in every button", () => {
+    const view = renderReport({
+      stats: statsFor("12h"),
+      fullName: "anyps5/anyps5",
+      repoUrl: "https://github.com/anyps5/anyps5",
+      page: "libraries",
+    });
+    const buttons = view.components.buttons[0] ?? [];
+
+    expect(buttons).toHaveLength(4);
+    expect(buttons.filter((button) => button.style === "primary")).toHaveLength(1);
+    for (const button of buttons) {
+      expect(parseReportCustomId(button.customId)?.range).toBe("12h");
+    }
+    expect(parseReportCustomId(buttons[2]?.customId ?? "")?.page).toBe("libraries");
+  });
+
+  it("refuses a custom ID it did not write", () => {
+    expect(parseReportCustomId("github:report:overview:1d")).toEqual({
+      page: "overview",
+      range: "1d",
+    });
+    expect(parseReportCustomId("github:report:bogus:1d")).toBeNull();
+    expect(parseReportCustomId("github:report:overview:2y")).toBeNull();
+    expect(parseReportCustomId("github:panel:overview:line:24")).toBeNull();
+    expect(parseReportCustomId("ticket:report:overview:1d")).toBeNull();
+  });
+
+  it("derives a window that ends now, whatever the monitor last recorded", () => {
+    const window = reportWindowFor("4h", END);
+    expect(window.to).toEqual(END);
+    expect(window.from.toISOString()).toBe(hoursBefore(4).toISOString());
+    // An unknown choice falls back to the default range rather than throwing.
+    expect(reportWindowFor("nonsense", END).from.toISOString()).toBe(hoursBefore(24).toISOString());
   });
 });

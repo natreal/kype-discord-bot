@@ -10,8 +10,9 @@
  * Recurrence is fixed-interval on purpose, and the interval comes from
  * configuration (`GITHUB_POLL_INTERVAL_MINUTES`) rather than from the job: the
  * scheduler only knows fixed intervals, and "every N minutes" is the only shape
- * this job needs. The default is one hour, which is also the granularity at which
- * AnyPS5's own CI republishes its statistics.
+ * this job needs. The default is fifteen minutes, which gives `/github report` a
+ * fine enough history to chart a day at readable resolution, while AnyPS5's own CI
+ * republishes its statistics less often than that.
  */
 import type { SchedulerService } from "../scheduler/scheduler.service.js";
 import type { TaskHandler, TaskHandlerContext, TaskHandlerResult } from "../scheduler/scheduler.types.js";
@@ -19,8 +20,8 @@ import type { RepositoryMonitorService } from "./repository.service.js";
 
 /** The task kind this module owns. */
 export const REPOSITORY_REFRESH_TASK_KIND = "repository.refresh";
-/** The scheduler refuses anything below a minute; one hour is the documented default. */
-export const DEFAULT_REFRESH_INTERVAL_MINUTES = 60;
+/** The scheduler refuses anything below a minute; fifteen is the documented default. */
+export const DEFAULT_REFRESH_INTERVAL_MINUTES = 15;
 export const MIN_REFRESH_INTERVAL_MINUTES = 1;
 
 export interface RepositoryRefreshHandlerOptions {

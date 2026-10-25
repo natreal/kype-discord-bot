@@ -27,6 +27,7 @@ import type {
 } from "../../src/services/github/client.js";
 import {
   EMPTY_CACHE,
+  MERGED_WINDOW,
   RepositoryProbe,
   type RepositoryCache,
 } from "../../src/services/anyps5/repository.probe.js";
@@ -106,6 +107,12 @@ function fakeClient(responses: {
   pulls?: unknown[][];
   /** Queue for the recently-closed window (`state=closed&sort=updated`). */
   closedPulls?: unknown[][];
+  /**
+   * Queue for the merge window, which is also `state=closed&sort=updated` and therefore
+   * indistinguishable by query. Given, it answers every closed call on its own; absent,
+   * the closed calls share `closedPulls`.
+   */
+  mergePulls?: unknown[][];
   /** When true, every conditional list endpoint answers `304 Not Modified`. */
   notModified?: boolean;
 }): GitHubClient & { readonly calls: string[]; readonly requests: GitHubRequest[] } {
@@ -114,6 +121,17 @@ function fakeClient(responses: {
   const commits = [...(responses.commits ?? [])];
   const pulls = [...(responses.pulls ?? [])];
   const closedPulls = [...(responses.closedPulls ?? [])];
+  const mergePulls = responses.mergePulls === undefined ? null : [...responses.mergePulls];
+  /**
+   * @returns the queue a closed-window call should read.
+   *
+   * The updated and merge windows send the same query, because the API has no
+   * `sort=merged`: the only difference between the calls is their size, which is what
+   * this switches on. That is also how a test scripts one of them without touching the
+   * other.
+   */
+  const closedQueue = (size: number | undefined): unknown[][] =>
+    mergePulls !== null && size !== undefined && size >= MERGED_WINDOW ? mergePulls : closedPulls;
   const etag = (path: string): string => `etag-${path.split("/").at(-1) ?? path}`;
   const ok = (body: unknown, path: string): GitHubResult => ({
     ok: true,
@@ -160,9 +178,14 @@ function fakeClient(responses: {
         return Promise.resolve(ok(page ?? [], request.path));
       }
       if (request.path.endsWith("/pulls")) {
-        // Two windows, two queues: they answer different questions and a test that
-        // scripted one must not silently consume the other.
-        const queue = request.query?.["state"] === "closed" ? closedPulls : pulls;
+        // Three windows, three answers: the created one, the updated one and the merge
+        // one. The two closed windows send the same query, so `closedQueue` tells them
+        // apart by page size — the only thing that differs between the two calls.
+        const state = request.query?.["state"];
+        const query = request.query as { readonly per_page?: number } | undefined;
+        const queue = state === "closed" ? closedQueue(query?.per_page) : pulls;
+        // The last page repeats, so a third reading sees the same list rather than an
+        // empty one — the same rule the commits queue follows.
         const page = queue.length > 1 ? queue.shift() : queue[0];
         return Promise.resolve(ok(page ?? [], request.path));
       }
@@ -206,7 +229,16 @@ function harness(options: {
   readonly commits?: unknown[][];
   readonly pulls?: unknown[][];
   readonly closedPulls?: unknown[][];
+  readonly mergePulls?: unknown[][];
   readonly progressStatus?: number;
+  /**
+   * The clock the service reads, for the retention tests.
+   *
+   * Only the service takes it: retention is a pruning decision the service makes, while
+   * the probe's `fetchedAt` is pinned to {@link NOW} by the fixtures — a second clock
+   * would let the two disagree about the same reading.
+   */
+  readonly now?: () => Date;
 }) {
   const repository = memoryMonitorRepository();
   const probe = new RepositoryProbe({
@@ -214,15 +246,17 @@ function harness(options: {
       ...(options.commits === undefined ? {} : { commits: options.commits }),
       ...(options.pulls === undefined ? {} : { pulls: options.pulls }),
       ...(options.closedPulls === undefined ? {} : { closedPulls: options.closedPulls }),
+      ...(options.mergePulls === undefined ? {} : { mergePulls: options.mergePulls }),
     }),
     target: { owner: "boykopovar", repo: "AnyPS5", branch: "main" },
     fetchImpl: fakeFetchQueue(
       options.progress ?? [progressBody(5_543, 47.39)],
       options.progressStatus ?? 200,
     ),
-    // Pinned to the same clock the service uses, so the fixtures' timestamps mean
-    // something: `mergedAt` is judged against the reading's `fetchedAt`.
-    now: () => NOW,
+    // One clock for the probe and the service, so a test that moves time moves both:
+    // a reading stamped "now" while pruning thinks it is forty days later would delete
+    // the reading it just wrote.
+    now: options.now ?? (() => NOW),
   });
   // Records what was published, including the events, so a test can assert the
   // message and the snapshot agree.
@@ -239,7 +273,7 @@ function harness(options: {
     probe,
     report,
     logger: testLogger,
-    now: () => NOW,
+    now: options.now ?? (() => NOW),
   });
   return { repository, monitor, report };
 }
@@ -349,23 +383,26 @@ describe("refreshing", () => {
     expect(merged[0]?.text).toContain("**Merged** PR #7");
   });
 
-  it("announces a merge that only the recently-closed window can see", async () => {
+  it("takes a merge from the merge window when the created windows never held it", async () => {
     const { monitor, repository } = harness({
       commits: [[], []],
-      // The created window never holds #7: it was opened days before the watch, and
-      // this repository opens more pull requests per hour than that window keeps.
+      // Neither created window holds #8: it was opened days before the watch, and this
+      // repository opens more pull requests per hour than that window keeps. Only the
+      // merge window carries it.
       pulls: [[], []],
-      closedPulls: [[], [pullPayload(7, { merged: true })]],
+      mergePulls: [[pullPayload(8, { merged: true })], []],
     });
 
     const first = await monitor.refresh();
-    const second = await monitor.refresh();
-
+    // The baseline announces nothing, whatever it saw: the repository already had a
+    // history and reposting it would be noise. What it must do is store the row.
     expect(first.baseline).toBe(true);
     expect(first.announced).toBe(0);
-    const merged = repository.events.filter((event) => event.key === "pull-request:7:merged");
-    expect(merged).toHaveLength(1);
-    expect(second.announced).toBe(1);
+    const stored = repository.pulls.find((pull) => pull.number === 8);
+    expect(stored?.merged).toBe(true);
+    // The date the report buckets merges by, which only this window supplies: the
+    // created window is ordered by creation and this pull request left it days ago.
+    expect(stored?.mergedAt?.toISOString()).toBe("2026-10-23T11:00:00.000Z");
   });
 
   it("stores a pull request first seen closed without announcing it as opened", async () => {
@@ -395,18 +432,34 @@ describe("refreshing", () => {
     expect(repository.snapshots[0]?.failures).toContain("progress");
   });
 
-  it("prunes snapshots older than the retention window", async () => {
-    const { monitor, repository } = harness({ commits: [[], []] });
+  it("prunes a snapshot older than the window it keeps", async () => {
+    // A clock the test owns: retention is a function of time, so the service must be
+    // asked at a later moment rather than the rows being edited behind its back.
+    let clock = NOW;
+    const { monitor, repository } = harness({ commits: [[], []], now: () => clock });
 
     await monitor.refresh();
-    // Age the first snapshot past the window (100 hours at hourly cadence).
-    const first = repository.snapshots[0];
-    if (first !== undefined) {
-      (first as { capturedAt: Date }).capturedAt = new Date(NOW.getTime() - 200 * 3_600_000);
-    }
+    // Forty-one days later. The window is `SNAPSHOT_RETENTION` hours — 960, which is
+    // the ten days of readings the count buys at a fifteen-minute cadence — so the first
+    // row is now outside it.
+    clock = new Date(NOW.getTime() + 41 * 24 * 3_600_000);
     await monitor.refresh();
 
     expect(repository.snapshots).toHaveLength(1);
+  });
+
+  it("keeps the whole window a report can ask for", async () => {
+    let clock = NOW;
+    const { monitor, repository } = harness({ commits: [[], []], now: () => clock });
+
+    await monitor.refresh();
+    // Nine days later: comfortably inside the 240 hours (960 rows at fifteen minutes)
+    // the monitor keeps, so `/github report range:7d` still finds its oldest hours
+    // rather than losing them to the pruner.
+    clock = new Date(NOW.getTime() + 9 * 24 * 3_600_000);
+    await monitor.refresh();
+
+    expect(repository.snapshots).toHaveLength(2);
   });
 });
 
