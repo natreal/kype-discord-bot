@@ -232,6 +232,9 @@ async function handlePanel(
 ): Promise<void> {
   const style = readStyle(interaction);
   const history = await monitor.history(HISTORY_ROWS);
+  // Asked for in parallel with nothing else: the feed is cached for two minutes and
+  // has its own deadline, so this costs a reply nothing when GitHub is slow.
+  const live = await monitor.liveFacts();
   const viewContext: GithubContext = {
     fullName: monitor.fullName,
     repoUrl: `https://github.com/${monitor.fullName}`,
@@ -244,6 +247,10 @@ async function handlePanel(
     // panel buttons a reader may press, and a missing one should cost those buttons
     // rather than the whole answer.
     ownerId: interaction.user?.id ?? null,
+    // Omitted rather than `null` when the deployment has no feed: the view treats a
+    // missing value as "not asked" and a `null` as "GitHub did not answer", so the two
+    // cannot be confused in the reply.
+    ...(live === undefined ? {} : { live }),
   };
 
   // A fresh watch is answered by the view itself, with an embed that explains why it

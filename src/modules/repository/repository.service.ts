@@ -43,6 +43,7 @@ import type {
   SnapshotRecord,
 } from "./repository.types.js";
 import { deriveEvents } from "./repository.events.js";
+import type { GitHubLiveFeed, GitHubLiveFacts } from "../../services/github/live-feed.js";
 
 /**
  * Snapshots kept per repository: a count, which becomes a cutoff when it is pruned.
@@ -122,6 +123,14 @@ export interface RepositoryMonitorOptions {
   readonly probe: RepositoryProbe;
   readonly report: RepositoryReportPort;
   readonly logger: Logger;
+  /**
+   * The live, token-backed view of the same repository.
+   *
+   * Optional so every existing caller — and every test that only exercises the
+   * snapshot path — keeps working: without it the panels render from stored history
+   * alone, which is exactly what they did before there was a feed.
+   */
+  readonly live?: GitHubLiveFeed;
   /** Overridable for tests; defaults to `() => new Date()`. */
   readonly now?: () => Date;
   /**
@@ -154,6 +163,8 @@ export class RepositoryMonitorService {
   private readonly report: RepositoryReportPort;
   private readonly logger: Logger;
   private readonly now: () => Date;
+  /** The live feed, or `null` when this deployment has none wired. */
+  private readonly live: GitHubLiveFeed | null;
   /** History kept, in hours, derived from the refresh cadence. */
   private readonly retentionHours: number;
 
@@ -162,6 +173,7 @@ export class RepositoryMonitorService {
     this.probe = options.probe;
     this.report = options.report;
     this.logger = options.logger.child("repository-monitor");
+    this.live = options.live ?? null;
     this.now = options.now ?? (() => new Date());
     // Defaulted to the fifteen-minute cadence the deployment ships with, so a caller that
     // does not know the interval still keeps the same number of readings of history.
@@ -171,6 +183,27 @@ export class RepositoryMonitorService {
   /** The `owner/repo` name the probe is configured with. */
   public get fullName(): string {
     return this.probe.fullName;
+  }
+
+  /**
+   * @returns what GitHub says right now — stars, the newest release, the last CI
+   * run, the language mix and the rate-limit quota.
+   *
+   * Three states, and the panels render each one differently: facts when the API
+   * answered, `null` when it did not (rate limit, outage, deadline), and `undefined`
+   * when this deployment has no live feed wired at all. Collapsing the last two would
+   * make a test build claim GitHub was down.
+   */
+  public async liveFacts(): Promise<GitHubLiveFacts | null | undefined> {
+    if (this.live === null) {
+      return undefined;
+    }
+    return this.live.latest();
+  }
+
+  /** Whether this deployment can read GitHub live, which is what a token buys. */
+  public get hasLiveFeed(): boolean {
+    return this.live !== null;
   }
 
   /**

@@ -505,8 +505,8 @@ export class InteractionHandler {
   }
 
   /**
-   * `github:panel:<panel>:<style>:<width>` and `github:select` — redraw a `/github`
-   * message on the panel that was clicked.
+   * `github:panel:<panel>:<style>:<width>`, `github:page:<panel>:<style>:<width>:<page>`
+   * and `github:select` — redraw a `/github` message on the panel that was clicked.
    *
    * The reply is edited in place rather than answered ephemerally: the panels are
    * public project statistics, and a channel that accrues one reply per click would
@@ -538,7 +538,13 @@ export class InteractionHandler {
 
     await interaction.deferUpdate();
     try {
-      const history = await monitor.history(GITHUB_HISTORY_ROWS);
+      const [history, live] = await Promise.all([
+        monitor.history(GITHUB_HISTORY_ROWS),
+        // The feed caches for two minutes and gives up after six seconds, so a page
+        // click never waits longer than the deferral window, and paging through the
+        // library table costs one round of API calls rather than one per page.
+        monitor.liveFacts(),
+      ]);
       const payload = renderView(
         buildGithubView({
           fullName: monitor.fullName,
@@ -549,6 +555,10 @@ export class InteractionHandler {
           style: request.style,
           width: request.width,
           ownerId: interaction.user.id,
+          // Carried from the pressed button, so the reader stays on page four instead
+          // of being thrown back to page one by their own click.
+          page: request.page,
+          ...(live === undefined ? {} : { live }),
         }),
       );
       await interaction.editReply({

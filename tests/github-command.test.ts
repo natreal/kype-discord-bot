@@ -42,12 +42,15 @@ import {
 } from "../../src/modules/repository/github-report.view.js";
 import type { RepositoryPullRequest } from "../../src/services/anyps5/repository.types.js";
 import {
+  MAX_COMPONENTS,
   MAX_FIELD,
+  pageCustomId,
   panelCustomId,
   parsePanelCustomId,
   isGithubComponent,
   absoluteTime,
 } from "../../src/modules/repository/github-view.js";
+import type { GitHubLiveFacts } from "../../src/services/github/live-feed.js";
 import { renderView } from "../../src/modules/repository/github-components.js";
 import { ComponentType } from "discord.js";
 import {
@@ -772,14 +775,230 @@ describe("buildGithubView — timeline and library movement", () => {
   });
 });
 
+/**
+ * @returns how many components a serialized reply carries, containers and their
+ * children included — which is what Discord counts against its ceiling of forty.
+ *
+ * `JSON.stringify` is used rather than walking builders because it is exactly the
+ * payload that goes over the wire, and a builder whose `toJSON` renames a field would
+ * otherwise be counted by an assumption rather than by its output.
+ */
+function countComponents(payload: unknown): number {
+  if (!Array.isArray(payload)) {
+    return 0;
+  }
+  let total = 0;
+  for (const node of payload) {
+    const record = node as { readonly components?: unknown };
+    total += 1;
+    total += countComponents(record.components);
+  }
+  return total;
+}
+
+describe("buildGithubView — library paging", () => {
+  /** @returns a context whose newest snapshot holds `count` libraries, at `page`. */
+  function paged(count: number, page?: number) {
+    const groups = Array.from({ length: count }, (_, index) =>
+      group(`lib-${index}`, index % 40, 100),
+    );
+    const only = snapshot(0, { done: 1_000, total: 6_000, percent: 16.67 }, groups);
+    return {
+      fullName: "anyps5/anyps5",
+      repoUrl: "https://github.com/anyps5/anyps5",
+      history: [only],
+      latest: only,
+      panel: "libraries" as const,
+      style: "line" as const,
+      width: 16,
+      ownerId: null,
+      ...(page === undefined ? {} : { page }),
+    };
+  }
+
+  it("stays inside Discord's forty-component ceiling, however many libraries there are", () => {
+    // The bug this pins: one container per page meant a project with enough libraries
+    // to fill eight pages sent eight containers of seven components each, and Discord
+    // refused the whole reply with COMPONENT_MAX_TOTAL_COMPONENTS_EXCEEDED — which is
+    // what made `/github libraries` fail on the real project.
+    for (const count of [1, 40, 200, 500]) {
+      const view = buildGithubView(paged(count));
+      const total = countComponents(JSON.parse(JSON.stringify(renderView(view).components)));
+      expect(total).toBeLessThanOrEqual(MAX_COMPONENTS);
+      // One table, so one container, at any size.
+      expect(view.blocks).toHaveLength(1);
+    }
+  });
+
+  it("offers previous, position and next only when there is more than one page", () => {
+    const short = buildGithubView(paged(2));
+    // Two short rows fit one page, so the panel row is the only row.
+    expect(short.components.buttons).toHaveLength(1);
+
+    const long = buildGithubView(paged(200));
+    // The panel row, then the page row.
+    expect(long.components.buttons).toHaveLength(2);
+    const labels = long.components.buttons[1]?.map((button) => button.label) ?? [];
+    expect(labels[0]).toBe("Previous");
+    expect(labels[1]).toMatch(/^Page 1\/\d+$/);
+    expect(labels[2]).toBe("Next");
+    // Nothing to go back to on the first page, and the row keeps its shape anyway.
+    expect(long.components.buttons[1]?.[0]?.disabled).toBe(true);
+    expect(long.components.buttons[1]?.[2]?.disabled).toBe(false);
+  });
+
+  it("opens the page a button names, and never an empty one", () => {
+    const first = buildGithubView(paged(200, 0));
+    const second = buildGithubView(paged(200, 1));
+    const titleOf = (view: ReturnType<typeof buildGithubView>): string => view.blocks[0]?.title ?? "";
+    const rowsOf = (view: ReturnType<typeof buildGithubView>): string =>
+      view.blocks[0]?.sections[0]?.text ?? "";
+
+    expect(titleOf(second)).toContain("(2/");
+    expect(rowsOf(second)).not.toBe(rowsOf(first));
+    // Every row still names a library, so a page is never a stray heading.
+    expect(rowsOf(second)).toContain("`LIB-");
+
+    // A page that no longer exists — a button from a message older than the last
+    // refresh — is clamped onto the last page rather than rendered empty, and there is
+    // nothing to go forward to from there.
+    const beyond = buildGithubView(paged(200, 999));
+    expect(beyond.blocks).toHaveLength(1);
+    expect(rowsOf(beyond).length).toBeGreaterThan(0);
+    expect(beyond.components.buttons[1]?.[2]?.disabled).toBe(true);
+  });
+});
+
+describe("buildGithubView — the live section", () => {
+  /** @returns a plain overview context with the given live state. */
+  function withLive(live?: GitHubLiveFacts | null) {
+    const only = snapshot(0, { done: 1_000, total: 6_000, percent: 16.67 }, [
+      group("audio", 500, 1_000),
+    ]);
+    return {
+      fullName: "anyps5/anyps5",
+      repoUrl: "https://github.com/anyps5/anyps5",
+      history: [only],
+      latest: only,
+      panel: "overview" as const,
+      style: "line" as const,
+      width: 16,
+      ownerId: null,
+      ...(live === undefined ? {} : { live }),
+    };
+  }
+
+  /** One plausible live answer, with more languages than a section shows. */
+  const facts: GitHubLiveFacts = {
+    fullName: "anyps5/anyps5",
+    description: "a PS5 emulator",
+    defaultBranch: "main",
+    stars: 12_345,
+    forks: 456,
+    watchers: 78,
+    openIssues: 9,
+    pushedAt: NOW,
+    archived: false,
+    release: { tag: "v0.4.2", name: "v0.4.2", publishedAt: NOW, url: "https://example.test" },
+    workflow: {
+      name: "build",
+      branch: "main",
+      status: "completed",
+      conclusion: "success",
+      updatedAt: NOW,
+      url: "https://example.test",
+    },
+    languages: [
+      { name: "C++", percent: 71.2 },
+      { name: "C", percent: 20.5 },
+      { name: "CMake", percent: 5.1 },
+      { name: "Python", percent: 3.2 },
+    ],
+    rateLimitRemaining: 4_987,
+    rateLimitResetAt: new Date(NOW.getTime() + 3_600_000),
+    authenticated: true,
+    fetchedAt: NOW,
+  };
+
+  it("says nothing at all when no live read was asked for", () => {
+    // The stored snapshot alone: the report and the unit tests run without the API, and
+    // an empty "live" heading would read as a broken feed.
+    const headings = buildGithubView(withLive())
+      .blocks.flatMap((block) => block.sections.map((section) => section.heading))
+      .join("\n");
+    expect(headings).not.toContain("Live");
+  });
+
+  it("says so when GitHub did not answer, instead of looking unchanged", () => {
+    const sections = buildGithubView(withLive(null)).blocks.flatMap((block) => block.sections);
+    const live = sections.find((section) => section.heading.includes("Live"));
+    expect(live).toBeDefined();
+    expect(live?.text).toContain("did not answer");
+  });
+
+  it("shows the counters, the release, the CI run and the quota", () => {
+    const sections = buildGithubView(withLive(facts)).blocks.flatMap((block) => block.sections);
+    const text = sections.find((section) => section.heading.includes("Live"))?.text ?? "";
+    expect(text).toContain("12,345");
+    expect(text).toContain("v0.4.2");
+    expect(text).toContain("success");
+    expect(text).toContain("4,987 left");
+    // Three languages, and the fourth is left out: the mix is a flavour, and all forty
+    // file types would push the quota off the section.
+    expect(text).toContain("C++");
+    expect(text).not.toContain("Python");
+  });
+
+  it("rides the first block only, so a two-block panel repeats nothing", () => {
+    const only = snapshot(0, { done: 1_000, total: 6_000, percent: 16.67 }, [
+      group("audio", 500, 1_000),
+    ]);
+    const view = buildGithubView({
+      fullName: "anyps5/anyps5",
+      repoUrl: "https://github.com/anyps5/anyps5",
+      history: [only],
+      latest: only,
+      panel: "graph",
+      style: "line",
+      width: 16,
+      ownerId: null,
+      live: facts,
+    });
+    const headings = view.blocks.map((block) =>
+      block.sections.map((section) => section.heading).join("|"),
+    );
+    expect(headings.filter((heading) => heading.includes("Live"))).toHaveLength(1);
+    expect(headings[0]).toContain("Live");
+  });
+});
+
 describe("panel custom IDs", () => {
   it("round-trips every panel and style", () => {
     for (const panel of ["overview", "libraries", "timeline", "graph", "why"] as const) {
       for (const style of ["bars", "line"] as const) {
         const customId = panelCustomId(panel, style, 24);
-        expect(parsePanelCustomId(customId)).toEqual({ panel, style, width: 24 });
+        // A panel button always opens page one, which is now a field of its own.
+        expect(parsePanelCustomId(customId)).toEqual({ panel, style, width: 24, page: 0 });
       }
     }
+  });
+
+  it("round-trips a page number without losing the panel", () => {
+    for (const panel of ["overview", "libraries", "timeline", "graph", "why"] as const) {
+      const customId = pageCustomId(panel, "bars", 24, 3);
+      expect(parsePanelCustomId(customId)).toEqual({ panel, style: "bars", width: 24, page: 3 });
+    }
+  });
+
+  it("refuses a page outside the range it writes", () => {
+    // The view clamps a page it is given, but a custom ID is input from a message that
+    // may have been edited by hand: negative, fractional and absurd pages are refused
+    // rather than clamped, so a hand-made ID cannot make the panel redraw forever.
+    expect(parsePanelCustomId("github:page:libraries:line:24:-1")).toBeNull();
+    expect(parsePanelCustomId("github:page:libraries:line:24:1.5")).toBeNull();
+    expect(parsePanelCustomId("github:page:libraries:line:24:1000")).toBeNull();
+    expect(parsePanelCustomId("github:page:libraries:line:24")).toBeNull();
+    expect(parsePanelCustomId("github:page:libraries:line:24:2:extra")).toBeNull();
   });
 
   it("accepts only its own namespace", () => {

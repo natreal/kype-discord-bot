@@ -143,6 +143,7 @@ import {
   TicketAiActions,
 } from "./modules/ai/index.js";
 import { GitHubClient } from "./services/github/client.js";
+import { GitHubLiveFeed } from "./services/github/live-feed.js";
 import { RepositoryProbe } from "./services/anyps5/repository.probe.js";
 import {
   DiscordRepositoryReport,
@@ -840,6 +841,12 @@ export async function createApplication(): Promise<Application> {
   const repositoryMonitor: RepositoryMonitorService = new RepositoryMonitorService({
     repository: new PrismaRepositoryMonitorRepository(database.prisma),
     probe: repositoryProbe,
+    // The same client, so the panels' live section and the hourly snapshot read the
+    // same repository through the same token and the same rate-limit budget.
+    live: new GitHubLiveFeed({
+      client: githubClient,
+      target: { owner: repositoryOwner, repo: repositoryName, branch: undefined },
+    }),
     // A function, not the adapter: the adapter is built on the next line and reads
     // the monitor's own history. Calling through a closure keeps the two
     // constructions acyclic and the dependency visible at the call site.
