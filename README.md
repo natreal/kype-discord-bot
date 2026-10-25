@@ -1299,7 +1299,59 @@ which cmd opens exclusively, so while the bot is running nothing else can write
 a start that reclaimed a stale lock end up. `npm run bot:tail` prints both; the
 deploy's readiness check reads `logs\bot.log`, where the bot itself writes.
 
-#### Leaving it running 24/7
+### The anyPS5 monitor window (Windows)
+
+`npm run monitor` opens a full-screen window on the watched repository: anyPS5's own
+`progress.json` every fifteen seconds, GitHub's live counters behind it, the history
+the window keeps itself and a log of what changed while you watched. It is the same
+data `/github` answers with, at a cadence a terminal can show.
+
+```powershell
+npm run monitor               # open it in this console, until you press q
+npm run monitor:start         # open it in a window of its own
+npm run monitor:status        # is the window open, and since when
+npm run monitor:stop          # close it
+npm run monitor:logs          # follow logs\monitor.log (restarts, not frames)
+npm run monitor:autostart     # open it at login (Task Scheduler)
+npm run monitor:autostart:status
+npm run monitor:autostart:remove
+```
+
+`monitor:start`, a logon and `Start-Bot.cmd`-style muscle memory all end up in the
+same window: `scripts/windows/monitor-run.ps1`, which runs `monitor.ts` in a loop.
+That loop is what makes the window 24/7 rather than "until something goes wrong":
+
+| Behaviour              | Mechanism                                                                            |
+| ---------------------- | ------------------------------------------------------------------------------------ |
+| A crash reopens it     | The loop restarts the monitor after 5s, doubling to 60s; a run that lasted 5 minutes resets the wait |
+| `q` still means quit   | A clean exit (code 0) closes the window instead of being undone a second later        |
+| Only one window        | `monitor:start` refuses when a runner is already up; the task uses `IgnoreNew`         |
+| Nothing else is killed | `monitor:stop` acts only on command lines naming `monitor-run.ps1` or `scripts\monitor.ts` |
+| Starts at login        | Task `kype-anyps5-monitor`, at logon, interactive, no execution time limit, runs on battery |
+
+Unlike the bot's login item this task is **visible** by design — a monitor nobody can
+see is not a monitor — so it opens Windows Terminal (falling back to a plain console
+when `wt.exe` is missing). It deliberately has no restart-on-failure setting: the
+runner loop already covers a crash, and a task that restarted its own action would
+undo `npm run monitor:stop`. The task's action hands the window to Windows Terminal and
+returns, so Task Scheduler reports it as `Ready` while the window is open;
+`monitor:status` therefore reports the window and the monitor process it found, which
+is the state that matters.
+
+The window is not free to run anonymously. One live read is four GitHub calls, so
+without `GITHUB_TOKEN` the live half caches for fifteen minutes to stay inside the
+sixty-call hour; with a token it uses the two-minute default and the header says
+`token · 5,000/h` instead of `anonymous · 60/h`. Progress polling costs nothing
+(anyPS5 publishes `progress.json`), so the build numbers stay live either way.
+
+`logs\monitor.log` records only what the frame cannot: when the window opened, when
+the monitor was restarted, and the exit code that caused it. Screen output belongs to
+the frame — the alternate screen is restored, so the shell you were using comes back
+untouched.
+
+---
+
+### Leaving it running 24/7
 
 Nothing in the bot polls on a timer: the scheduler sleeps until the next task is
 actually due (it wakes immediately for work it schedules itself), so an idle bot does
@@ -1315,7 +1367,9 @@ The one thing no bot can do is stay online on a suspended machine: a sleeping Wi
 cannot hold a gateway connection. `npm run bot:autostart` removes the manual step at
 the next login, and the supervisor plus the scheduler's stale-claim recovery return any
 task that was mid-flight when the machine went down — so a reboot costs uptime, never
-correctness.
+correctness. The monitor window is bound by the same limit: `npm run monitor:autostart`
+opens it again after a login, and a suspended machine paints nothing (the frame it
+comes back to is simply the next one it draws).
 
 On a host with the OpenClaw console watchdog, `npm run bot:stop` is a pause, not an
 off switch: the watchdog starts the `kype-discord-bot` task again within a minute.

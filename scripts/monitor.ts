@@ -149,7 +149,16 @@ async function main(): Promise<void> {
   // The live half is optional by construction: without a token it still answers, just
   // rarely, and the window's header says "anonymous" instead of "token" so the reason
   // a panel is stale is on the screen rather than in the reader's head.
-  const live = new GitHubLiveFeed({ client, target: { owner, repo } });
+  //
+  // A window left open all day is a different load from a slash command, so the cache
+  // follows the quota: one live read is four calls, and anonymous GitHub allows sixty
+  // an hour, which a two-minute cache would spend twice over. A quarter of an hour
+  // keeps the panel inside the hour; a token buys the two-minute default back.
+  const live = new GitHubLiveFeed({
+    client,
+    target: { owner, repo },
+    ...(token === undefined || token === "" ? { ttlMs: 15 * 60_000 } : {}),
+  });
   const feed = new MonitorFeed({
     repository: args.repository,
     intervalMs: args.intervalMs,
