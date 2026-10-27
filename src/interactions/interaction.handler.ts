@@ -74,25 +74,13 @@ import { TICKET_IDS } from "../modules/tickets/index.js";
 import type { TicketService } from "../modules/tickets/ticket.service.js";
 import type { ReminderService } from "../modules/reminders/index.js";
 import type { RepositoryMonitorService } from "../modules/repository/index.js";
-import {
-  buildGithubView,
-  isGithubComponent,
-  parsePanelCustomId,
-  renderView,
-} from "../modules/repository/index.js";
+import { isGithubComponent, parsePanelCustomId, renderView } from "../modules/repository/index.js";
+import { renderGithubPanel } from "../modules/repository/github-request.js";
 import { parseReportCustomId, renderReport } from "../modules/repository/github-report.view.js";
 import {
   buildReportStats,
   reportWindowFor,
 } from "../modules/repository/repository-report.analytics.js";
-
-/**
- * Snapshots read per `/github` render, matching the command's own window.
- *
- * The storage window, not a display limit: each panel trims what it draws, and the
- * trend and decomposition want as much history as the monitor keeps.
- */
-const GITHUB_HISTORY_ROWS = 72;
 
 /**
  * Interactions that carry a guild member and can therefore be gated.
@@ -534,60 +522,36 @@ export class InteractionHandler {
     }
 
     await interaction.deferUpdate();
-    // The read is separated from the render so a failure says which half broke: a
-    // database outage and a panel that no longer fits the message are different
-    // problems, and telling a reader "try again" for the second one was misleading.
-    // The live feed is fetched alongside it and is allowed to fail on its own: it is
-    // cached and time-boxed, and a page that misses it is still worth showing.
-    let history: Awaited<ReturnType<RepositoryMonitorService["history"]>>;
-    let live: Awaited<ReturnType<RepositoryMonitorService["liveFacts"]>>;
+    // One renderer for every surface: this used to build the view inline, which is how
+    // `/github libraries` and a clicked panel came to disagree about paging — only this
+    // path knew how to place a page, so a slash invocation replayed page one.
     try {
-      [history, live] = await Promise.all([
-        monitor.history(GITHUB_HISTORY_ROWS),
-        // The feed caches for two minutes and gives up after six seconds, so a page
-        // click never waits longer than the deferral window, and paging through the
-        // library table costs one round of API calls rather than one per page.
-        monitor.liveFacts().catch(() => undefined),
-      ]);
-    } catch (error) {
-      this.logger.error("Failed to read /github history for a panel", error, {
-        customId: interaction.customId,
+      const answer = await renderGithubPanel({
+        monitor,
+        panel: request.panel,
+        style: request.style,
+        ownerId: interaction.user.id,
+        width: request.width,
+        // Carried from the pressed button, so the reader stays on page four instead
+        // of being thrown back to page one by their own click.
+        page: request.page,
+        live: "fetch",
       });
-      await this.safeReply(
-        interaction,
-        "The project history could not be read. Try `/github` again in a moment.",
-      );
-      return;
-    }
-
-    try {
-      const payload = renderView(
-        buildGithubView({
-          fullName: monitor.fullName,
-          repoUrl: `https://github.com/${monitor.fullName}`,
-          history,
-          latest: history.at(-1) ?? null,
-          panel: request.panel,
-          style: request.style,
-          width: request.width,
-          ownerId: interaction.user.id,
-          // Carried from the pressed button, so the reader stays on page four instead
-          // of being thrown back to page one by their own click.
-          page: request.page,
-          ...(live === undefined ? {} : { live }),
-        }),
-      );
+      if (answer.kind !== "view") {
+        await this.safeReply(interaction, answer.text);
+        return;
+      }
       await interaction.editReply({
-        components: payload.components,
+        components: answer.payload.components,
         flags: MessageFlags.IsComponentsV2,
       });
     } catch (error) {
       this.logger.error("Failed to render a /github panel", error, {
         customId: interaction.customId,
-        snapshots: history.length,
         panel: request.panel,
         style: request.style,
         width: request.width,
+        page: request.page,
       });
       // An API error here is almost always the payload being refused — too many
       // components — rather than Discord being briefly unavailable, so the copy names

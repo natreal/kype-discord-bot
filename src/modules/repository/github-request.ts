@@ -65,6 +65,14 @@ export async function renderGithubPanel(input: {
   readonly ownerId: string | null;
   readonly width?: number;
   /**
+   * Which page of a paginated panel to render, as carried by a page button.
+   *
+   * The click path used to be the only one that could page, because it built the view
+   * itself; `/github libraries` went through here and had nowhere to put the page, so
+   * it re-rendered page one on every click. Absent means the first page.
+   */
+  readonly page?: number;
+  /**
    * Whether to ask the live feed, and where to put its answer.
    *
    * The slash command asks for it explicitly because its own subcommand already did;
@@ -89,6 +97,7 @@ export async function renderGithubPanel(input: {
     style: input.style,
     width: input.width ?? GRAPH_WIDTH,
     ownerId: input.ownerId,
+    ...(input.page === undefined ? {} : { page: input.page }),
     // Omitted rather than `null` when the feed is absent: the view treats a missing
     // value as "not asked" and a `null` as "GitHub did not answer", so the two cannot
     // be confused in the reply.

@@ -16,6 +16,7 @@ import { describe, expect, it } from "vitest";
 
 import { GitHubClient } from "../../src/services/github/client.js";
 import { GitHubLiveFeed } from "../../src/services/github/live-feed.js";
+import { renderGithubPanel } from "../../src/modules/repository/github-request.js";
 
 const NOW = new Date("2026-10-25T12:00:00.000Z");
 
@@ -155,11 +156,7 @@ describe("GitHubLiveFeed", () => {
     const fetchImpl = scriptedFetch(healthy);
     const feed = feedOver(fetchImpl, { now: NOW });
 
-    const [left, right, third] = await Promise.all([
-      feed.latest(),
-      feed.latest(),
-      feed.latest(),
-    ]);
+    const [left, right, third] = await Promise.all([feed.latest(), feed.latest(), feed.latest()]);
 
     // Three readers, one fetch: five people pressing a panel button in the same minute
     // must not spend five rounds of quota.
@@ -193,7 +190,10 @@ describe("GitHubLiveFeed", () => {
 
   it("gives up at the deadline rather than holding a reply open", async () => {
     const fetchImpl = scriptedFetch(
-      () => new Promise<Response>(() => { /* never answers */ }),
+      () =>
+        new Promise<Response>(() => {
+          /* never answers */
+        }),
     );
     const feed = feedOver(fetchImpl, { now: NOW }, { deadlineMs: 20 });
 
@@ -212,3 +212,84 @@ describe("GitHubLiveFeed", () => {
   });
 });
 
+/**
+ * Paging is a property of the renderer, not of the surface that calls it.
+ *
+ * `/github libraries` and a pressed page button both go through `renderGithubPanel`;
+ * when the page was only accepted by the button path, a slash invocation replayed
+ * page one forever and the arrows looked broken. This pins the page to the renderer.
+ */
+describe("renderGithubPanel paging", () => {
+  const groups = Array.from({ length: 400 }, (_, index) => ({
+    name: `library-${index}`,
+    label: `library-${index}`,
+    done: 100 + index,
+    total: 1_000 + index,
+    percent: 50,
+  }));
+
+  const snapshot = {
+    id: "s1",
+    capturedAt: NOW,
+    state: {
+      stars: 1,
+      forks: 1,
+      openIssues: 1,
+      librariesDone: 5_500,
+      librariesTotal: 11_697,
+      libraryPercent: 47,
+      shadersDone: 1,
+      shadersTotal: 2,
+      shaderPercent: 50,
+    },
+    progressCommit: null,
+    progress: { libraries: { groups }, shaders: { groups: [] } },
+    commitCount: 0,
+    pullCount: 0,
+    failures: [],
+  };
+
+  const monitor = {
+    fullName: "anyps5/anyps5",
+    history: async () => [snapshot],
+    liveFacts: async () => undefined,
+  } as never;
+
+  /** @returns the heading of the rendered panel, which carries the page counter. */
+  async function heading(page?: number): Promise<string> {
+    const answer = await renderGithubPanel({
+      monitor,
+      panel: "libraries",
+      style: "line",
+      ownerId: null,
+      width: 15,
+      ...(page === undefined ? {} : { page }),
+      live: null,
+    });
+    if (answer.kind !== "view") {
+      throw new Error("expected a view answer");
+    }
+    const container = (answer.payload.components[0] as never as { toJSON(): never }).toJSON() as {
+      components: Array<{ content?: string }>;
+    };
+    return container.components[0]?.content ?? "";
+  }
+
+  it("renders the first page when no page is given", async () => {
+    expect(await heading()).toContain("(1/");
+  });
+
+  it("honours the page it is asked for", async () => {
+    const first = await heading(0);
+    const second = await heading(1);
+    const third = await heading(2);
+
+    expect(first).toContain("(1/");
+    expect(second).toContain("(2/");
+    expect(third).toContain("(3/");
+    // The regression this guards: a paged render that ignores its page is identical
+    // to the first one, which is exactly what made the arrows look dead.
+    expect(second).not.toBe(first);
+    expect(third).not.toBe(second);
+  });
+});
