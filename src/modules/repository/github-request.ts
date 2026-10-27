@@ -18,6 +18,7 @@ import {
   type ReportRangeId,
 } from "./repository-report.analytics.js";
 import type { RepositoryMonitorService } from "./repository.service.js";
+import type { GitHubLiveFacts } from "../../services/github/live-feed.js";
 import { BAR_GUTTER, MAX_ROW } from "./repository-chart.js";
 
 /**
@@ -63,8 +64,22 @@ export async function renderGithubPanel(input: {
   readonly style: "bars" | "line";
   readonly ownerId: string | null;
   readonly width?: number;
+  /**
+   * Whether to ask the live feed, and where to put its answer.
+   *
+   * The slash command asks for it explicitly because its own subcommand already did;
+   * `!g` asks here so a typed panel shows the stars and releases a clicked one does.
+   * Omitted means "do not ask", which keeps the renderer usable without a feed.
+   */
+  readonly live?: "fetch" | GitHubLiveFacts | null | undefined;
 }): Promise<GithubAnswer> {
-  const history = await input.monitor.history(HISTORY_ROWS);
+  const [history, live] = await Promise.all([
+    input.monitor.history(HISTORY_ROWS),
+    // Cached for two minutes and time-boxed, so this costs a reply nothing when
+    // GitHub is slow, and a failure leaves the panel without the live fields rather
+    // than without an answer.
+    input.live === "fetch" ? input.monitor.liveFacts().catch(() => undefined) : input.live,
+  ]);
   const context: GithubContext = {
     fullName: input.monitor.fullName,
     repoUrl: `https://github.com/${input.monitor.fullName}`,
@@ -74,6 +89,10 @@ export async function renderGithubPanel(input: {
     style: input.style,
     width: input.width ?? GRAPH_WIDTH,
     ownerId: input.ownerId,
+    // Omitted rather than `null` when the feed is absent: the view treats a missing
+    // value as "not asked" and a `null` as "GitHub did not answer", so the two cannot
+    // be confused in the reply.
+    ...(live === undefined ? {} : { live }),
   };
   const view = buildGithubView(context);
   return { kind: "view", payload: renderView(view), blockCount: view.blocks.length };
@@ -148,6 +167,10 @@ export async function renderGithubMessage(input: {
         panel: request.panel,
         style: request.style,
         ownerId: input.ownerId,
+        // A typed panel shows the same live fields a clicked one does. Asking here
+        // rather than in `messageCreate` keeps the fetch next to the render that needs
+        // it, and the prefix never has to know which panels use it.
+        live: "fetch",
       });
   }
 }

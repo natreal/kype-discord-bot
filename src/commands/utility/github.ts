@@ -270,6 +270,10 @@ async function handlePanel(
       // rather than the whole answer.
       ownerId: interaction.user?.id ?? null,
       width: GRAPH_WIDTH,
+      // Asked through the shared renderer so `/github` and `!g` show the same live
+      // fields: the feed is cached for two minutes and has its own deadline, so this
+      // costs a reply nothing when GitHub is slow.
+      live: "fetch",
     }),
   );
 }

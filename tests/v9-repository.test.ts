@@ -815,6 +815,9 @@ describe("/github interaction acknowledgement", () => {
     fullName: "boykopovar/AnyPS5",
     history: () => Promise.resolve<SnapshotRecord[]>([]),
     refresh: () => Promise.reject(new Error("refresh requires server.settings")),
+    // No live feed wired: the panels render from stored snapshots, which is the state a
+    // deployment without `GITHUB_TOKEN` runs in.
+    liveFacts: () => Promise.resolve(undefined),
   } as unknown as RepositoryMonitorService;
 
   const context = { repositoryMonitor: monitor } as unknown as CommandExecutionContext;
@@ -1127,6 +1130,9 @@ describe("/github status pull requests", () => {
         fullName: "boykopovar/AnyPS5",
         history: () => Promise.resolve([latest]),
         recentPullRequests,
+        // The overview asks the live feed for facts; no feed is wired here, so it gets
+        // the "not requested" answer and renders the snapshot alone.
+        liveFacts: () => Promise.resolve(undefined),
       },
     } as unknown as CommandExecutionContext;
     const replies: unknown[] = [];

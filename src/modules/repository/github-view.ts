@@ -39,13 +39,14 @@ import {
   fenceChart,
   formatValue,
   gauge,
-  MAX_ROW,
   BAR_GUTTER,
+  MAX_ROW,
   renderSparkline,
   scaleSeries,
   type ChartStyle,
 } from "./repository-chart.js";
 import { formatCount } from "./repository.events.js";
+import type { GitHubLiveFacts } from "../../services/github/live-feed.js";
 
 /**
  * The most text one block of a reply may hold.
@@ -60,46 +61,17 @@ export const MAX_FIELD = 4_000;
 export const MAX_FIELD_NAME = 256;
 /** Characters allowed in a panel's introduction. */
 export const MAX_DESCRIPTION = 4_096;
-
 /**
- * Components Discord accepts in one message, from the Components V2 reference:
- * "Messages allow up to 40 total components".
+ * Discord rejects a message carrying more than forty components.
  *
- * The count is of *every* component, not just the top-level ones, so a panel is
- * budgeted in whole blocks rather than in characters alone.
+ * The ceiling every layout decision in this file answers to: `/github libraries`
+ * used to fail with COMPONENT_MAX_TOTAL_COMPONENTS_EXCEEDED because it sent one
+ * container per table page, and the panel, its selector and eleven pages of
+ * libraries add up past forty.
  */
 export const MAX_COMPONENTS = 40;
-
-/**
- * What the buttons and the selector cost: five panel buttons in one action row, the
- * selector row itself, and the five options inside it.
- */
-export const CONTROL_COMPONENTS = 5 + 1 + 5;
-
-/**
- * What one page block costs inside its container, measured against a real paginated
- * table: the heading, the description, a separator, a heading and a body text display
- * for the section, then a separator and the footer.
- *
- * Taken at the *most expensive* shape. A block with an empty description is one
- * cheaper, and a body that splits across several text displays is one more per extra
- * piece; budgeting for the common case keeps that split from pushing a full message
- * over the cap.
- */
-export const BLOCK_COMPONENTS = 8;
-
-/**
- * The most page blocks one message may carry.
- *
- * Derived rather than guessed: {@link MAX_COMPONENTS} in total, minus what the buttons
- * and selector cost, divided by what one block costs. Being one block short is a
- * shorter table, while being one block over is a reply Discord rejects whole — so the
- * block cost is taken at its most expensive and the division rounds down.
- */
-export const MAX_BLOCKS = Math.max(
-  1,
-  Math.floor((MAX_COMPONENTS - CONTROL_COMPONENTS) / BLOCK_COMPONENTS),
-);
+/** The highest page number a custom ID may carry; the view clamps anything below. */
+export const MAX_PAGE = 999;
 
 /** The panels `/github` can show, and the buttons that switch between them. */
 export type GithubPanel = "overview" | "libraries" | "timeline" | "graph" | "why";
@@ -166,6 +138,20 @@ export interface ComponentRows {
   readonly select: ComponentSelect | null;
 }
 
+/**
+ * Where a panel is within its own pages.
+ *
+ * Pagination exists because of Discord's forty-component ceiling, not because a
+ * reader asked for it: the alternative — a container per page — made the libraries
+ * panel unrenderable for a project with a few hundred libraries.
+ */
+export interface PanelPaging {
+  /** Zero-based page actually being rendered, already clamped to `pages - 1`. */
+  readonly page: number;
+  /** How many pages the panel has; at least one. */
+  readonly pages: number;
+}
+
 /** One complete `/github` render. */
 export interface GithubView {
   /** One block per page; almost always a single block. */
@@ -191,6 +177,21 @@ export interface GithubContext {
   readonly width: number;
   /** `null` when the clicker did not open this view, so buttons stay usable. */
   readonly ownerId: string | null;
+  /**
+   * Which page of the library table to render, as carried by a page button.
+   *
+   * Absent means the first page. Out-of-range values are clamped, because a custom ID
+   * written before a refresh can name a page that no longer exists.
+   */
+  readonly page?: number;
+  /**
+   * Fresh GitHub facts, or `null` when they could not be read.
+   *
+   * Three states, and all three are meaningful: absent means the caller did not ask
+   * for a live read (the tests, the report), `null` means it asked and GitHub did not
+   * answer, and facts mean the panel can show what the API says right now.
+   */
+  readonly live?: GitHubLiveFacts | null;
 }
 
 /** Fallback palette, used when the project name is not known yet. */
@@ -215,24 +216,45 @@ export function buildGithubView(context: GithubContext): GithubView {
       components: componentRows("overview", context.style, context.width, false),
     };
   }
-  const bodies = panelBody(context);
+  // Built once and shared by every page: the rows are the expensive part (one gauge
+  // and one delta per library), and a page only chooses which slice to show.
+  const table = context.panel === "libraries" ? libraryTable(context) : null;
+  const pages = table === null ? 1 : table.pages.length;
+  // Clamped, not trusted: a page button from a message sent before a refresh can name
+  // a page that no longer exists, and an empty block would read as a broken panel.
+  const page = Math.min(Math.max(Math.trunc(context.page ?? 0), 0), Math.max(pages, 1) - 1);
   return {
-    // Every block carries the footer, so a multi-block table reads the same on its
-    // last page as the overview does.
-    blocks: bodies.map((body) => ({ ...body, footer: footerFor(context) })),
-    components: componentRows(context.panel, context.style, context.width, true),
+    // **One block, always.** The table used to become one container per page, which is
+    // what made `/github libraries` fail with COMPONENT_MAX_TOTAL_COMPONENTS_EXCEEDED:
+    // a project with enough libraries to fill eight pages needed eight containers of
+    // seven components each, plus the panel buttons and the selector, and Discord
+    // rejects the whole message at forty. The pages are navigated with buttons now, so
+    // the reply is one container no matter how many libraries the project has.
+    blocks: panelBody(context, table, page).map((block, index) => ({
+      // The live section describes the project, not the page, so it rides the first.
+      ...withLiveSection(block, index === 0 ? context.live : undefined),
+      footer: footerFor(context),
+    })),
+    components: componentRows(context.panel, context.style, context.width, true, { page, pages }),
   };
 }
 
 /**
- * @returns one block per panel page. A list rather than a single block because a
- * project with many libraries needs more than one: the table continues onto further
- * blocks instead of being truncated.
+ * @returns one block per panel, in the order they are sent.
+ *
+ * A list rather than a single block because two panels (the graph and the timeline)
+ * genuinely put a figure and its legend in separate blocks. The library table is *not*
+ * one of them: it is `table`'s page, so the count stays at one whatever the project's
+ * size.
  */
-function panelBody(context: GithubContext): Omit<ViewBlock, "footer">[] {
+function panelBody(
+  context: GithubContext,
+  table: LibraryTable | null,
+  page: number,
+): Omit<ViewBlock, "footer">[] {
   switch (context.panel) {
     case "libraries":
-      return librariesPanel(context);
+      return [librariesPanel(context, table, page)];
     case "timeline":
       return timelinePanel(context);
     case "graph":
@@ -346,6 +368,93 @@ export function clip(text: string, limit: number): string {
 /** @returns lines joined with newlines, clipped to one field body. */
 function body(lines: readonly string[], limit = MAX_FIELD): string {
   return clip(lines.filter((line) => line.length > 0).join("\n"), limit);
+}
+
+/**
+ * @returns how long until `date` — for a quota window that resets in the *future*,
+ * where {@link relativeTime} would answer "just now" for every future moment.
+ */
+export function untilTime(date: Date, now: Date = new Date()): string {
+  const seconds = Math.round((date.getTime() - now.getTime()) / 1_000);
+  if (seconds <= 0) {
+    return "now";
+  }
+  const minutes = Math.round(seconds / 60);
+  if (minutes < 60) {
+    return `in ${Math.max(1, minutes)}m`;
+  }
+  return `in ${Math.round(minutes / 60)}h`;
+}
+
+/** @returns `block` with the live section appended, or unchanged when there is none. */
+function withLiveSection(
+  block: Omit<ViewBlock, "footer">,
+  live: GitHubLiveFacts | null | undefined,
+): Omit<ViewBlock, "footer"> {
+  const section = liveSection(live);
+  return section === null ? block : { ...block, sections: [...block.sections, section] };
+}
+
+/**
+ * The live section: what GitHub says this second, as opposed to what the last
+ * snapshot recorded.
+ *
+ * @returns `null` when the caller did not ask for a live read, and a section that
+ * *says* the read failed when it did and GitHub did not answer. Silence would be
+ * worse: a panel that looks identical to the snapshot-only one is
+ * indistinguishable from a panel whose live read quietly stopped working, and the
+ * one thing a monitor must never do is fail quietly.
+ */
+function liveSection(live: GitHubLiveFacts | null | undefined): ViewSection | null {
+  if (live === undefined) {
+    return null;
+  }
+  if (live === null) {
+    return {
+      heading: "▬ Live · GitHub API",
+      text: "▬ GitHub did not answer just now — this is the stored snapshot alone. Opening the panel again retries.",
+    };
+  }
+  const counters = [
+    `⭐ ${formatCount(live.stars)}`,
+    `🍴 ${formatCount(live.forks)}`,
+    `👀 ${formatCount(live.watchers)}`,
+    `🐞 ${formatCount(live.openIssues)} open`,
+    ...(live.archived ? ["📦 archived"] : []),
+  ].join(" · ");
+  const release =
+    live.release === null
+      ? "🏷️ no release yet"
+      : `🏷️ ${live.release.tag}${live.release.publishedAt === null ? "" : ` · ${relativeTime(live.release.publishedAt)}`}`;
+  const workflow =
+    live.workflow === null
+      ? "⚙️ no CI run on record"
+      : `⚙️ \`${live.workflow.branch}\` · ${live.workflow.conclusion ?? live.workflow.status}${
+          live.workflow.updatedAt === null ? "" : ` · ${relativeTime(live.workflow.updatedAt)}`
+        }`;
+  // Three languages, not all of them: the mix is a flavour, and a repository with
+  // forty file types would push the quota line off the bottom of the section.
+  const languages = live.languages
+    .slice(0, 3)
+    .map((language) => `${language.name} ${formatValue(language.percent, 1)}%`)
+    .join(" · ");
+  const quota =
+    live.rateLimitRemaining === null
+      ? `🔑 ${live.authenticated ? "token" : "anonymous"} · quota not reported`
+      : `🔑 ${live.authenticated ? "token" : "anonymous"} · ${formatCount(live.rateLimitRemaining)} left${
+          live.rateLimitResetAt === null ? "" : ` · resets ${untilTime(live.rateLimitResetAt)}`
+        }`;
+  return {
+    heading: "▬ Live · GitHub API",
+    text: body([
+      counters,
+      release,
+      workflow,
+      languages.length === 0 ? "" : `🧬 ${languages}`,
+      `${quota}${live.pushedAt === null ? "" : ` · ⬆️ pushed ${relativeTime(live.pushedAt)}`}`,
+      `-# read ${relativeTime(live.fetchedAt)}`,
+    ]),
+  };
 }
 
 /**
@@ -621,8 +730,21 @@ export function formatSpan(days: number): string {
   return rest === 0 ? `${whole}d` : `${whole}d ${rest}h`;
 }
 
+/** One rendered page of the library table. */
+interface LibraryPage {
+  readonly rows: readonly { readonly text: string }[];
+}
+
+/** The library table, rendered once and then paged through by the buttons. */
+interface LibraryTable {
+  readonly title: string;
+  readonly description: string;
+  readonly capturedAt: Date;
+  readonly pages: readonly LibraryPage[];
+}
+
 /**
- * The full library table, with how each one moved since the last comparable read.
+ * Builds the full library table, with how each one moved since the last comparable read.
  *
  * The comparison is against the last snapshot that *has* a table, not simply the
  * previous row: a failed fetch stores a snapshot with no library data, and using
@@ -630,31 +752,17 @@ export function formatSpan(days: number): string {
  *
  * Rows are one code lane per library (`name  gauge  12.34%`), so the numbers line
  * up in the monospaced run the way a table would.
+ *
+ * @returns the table, or `null` when this snapshot stored no per-library data at all.
  */
-function librariesPanel(context: GithubContext): Omit<ViewBlock, "footer">[] {
+function libraryTable(context: GithubContext): LibraryTable | null {
   const snapshot = context.latest as SnapshotRecord;
   const libraries = readLibraries(snapshot);
-  const previous = comparableLibraries(context);
-  const title = `${context.fullName} — libraries`;
-  const url = context.repoUrl;
-
   if (libraries.length === 0) {
-    return [
-      {
-        title,
-        url,
-        description: `Captured **${relativeTime(snapshot.capturedAt)}**.`,
-        color: PALETTE.flat,
-        sections: [
-          {
-            heading: "▬ No per-library table in this snapshot",
-            text: "This snapshot stored no library data, or `progress.json` was unreadable when it was taken. The next successful refresh fills the table in.",
-          },
-        ],
-      },
-    ];
+    return null;
   }
 
+  const previous = comparableLibraries(context);
   const before = previous === null ? [] : readLibraries(previous);
   const analysis = analyzeLibraries(before, libraries, 4);
   const done = libraries.reduce((sum, library) => sum + library.done, 0);
@@ -680,12 +788,11 @@ function librariesPanel(context: GithubContext): Omit<ViewBlock, "footer">[] {
     MAX_DESCRIPTION,
   );
 
-  // Most incomplete first: the libraries a reader can act on belong at the top, and
-  // a project with many small libraries continues over further embeds.
+  // Most incomplete first: the libraries a reader can act on belong at the top.
   const ordered = [...libraries].sort(
     (left, right) => right.total - right.done - (left.total - left.done),
   );
-  // Pages are filled to the field's character budget, not to a fixed row count: the
+  // Pages are filled to the block's character budget, not to a fixed row count: the
   // rows themselves are two lines each and vary with the size of the numbers, so a
   // fixed count of 22 overflowed `MAX_FIELD` and silently dropped the last libraries
   // of every page.
@@ -693,46 +800,67 @@ function librariesPanel(context: GithubContext): Omit<ViewBlock, "footer">[] {
     library,
     text: libraryRow(library, analysis.before, movement),
   }));
-  const paginated = paginate(rows, MAX_FIELD);
-  // A table with a great many libraries paginates to more blocks than one message can
-  // hold, and Discord rejects such a payload whole rather than shortening it — which is
-  // how the libraries panel came to answer "Discord rejected the request". The cap is on
-  // blocks, not characters, because the component count is what Discord checks.
-  const pages = paginated.slice(0, MAX_BLOCKS);
-  // Counted, not estimated: a reader is told the real number of libraries left out.
-  const omitted = paginated.slice(pages.length).reduce((sum, page) => sum + page.length, 0);
+  const pages: LibraryPage[] = paginate(rows, MAX_FIELD).map((page) => ({
+    rows: page.map((row) => ({ text: row.text })),
+  }));
 
-  return pages.map((page, index) => {
-    const last = index === pages.length - 1;
-    // A cut table says so on the page that was cut, and names the way to see the rest:
-    // a reader who is not told would take the shortened table for the whole project.
-    const cut =
-      last && omitted > 0
-        ? `▬ **${formatCount(omitted)} more ${omitted === 1 ? "library" : "libraries"}** do not fit in one message. \`/github report\` charts them by movement.`
-        : "";
-    // A `+` in the counter, so "3/3+" never claims to be the end of a longer table.
-    const counter = omitted > 0 ? `${index + 1}/${pages.length}+` : `${index + 1}/${pages.length}`;
+  return {
+    title: `${context.fullName} — libraries`,
+    description,
+    capturedAt: snapshot.capturedAt,
+    pages,
+  };
+}
+
+/**
+ * One page of the library table.
+ *
+ * Only the requested page is rendered, and it is the only table block in the reply:
+ * see {@link buildGithubView} for why stacking one container per page was a bug and
+ * not a layout choice.
+ */
+function librariesPanel(
+  context: GithubContext,
+  table: LibraryTable | null,
+  page: number,
+): Omit<ViewBlock, "footer"> {
+  const snapshot = context.latest as SnapshotRecord;
+  const title = `${context.fullName} — libraries`;
+
+  if (table === null) {
     return {
-      title: pages.length === 1 && omitted === 0 ? title : `${title} (${counter})`,
-      url,
-      description: body(
-        [
-          index === 0
-            ? description
-            : `Captured **${relativeTime(snapshot.capturedAt)}** · most incomplete first.`,
-          cut,
-        ],
-        MAX_DESCRIPTION,
-      ),
-      color: PALETTE.idle,
+      title,
+      url: context.repoUrl,
+      description: `Captured **${relativeTime(snapshot.capturedAt)}**.`,
+      color: PALETTE.flat,
       sections: [
         {
-          heading: "Library · share · implemented / discovered · change",
-          text: page.map((row) => row.text).join("\n"),
+          heading: "▬ No per-library table in this snapshot",
+          text: "This snapshot stored no library data, or `progress.json` was unreadable when it was taken. The next successful refresh fills the table in.",
         },
       ],
     };
-  });
+  }
+
+  const total = table.pages.length;
+  const rows = table.pages[page]?.rows ?? [];
+  return {
+    // The position is in the title as well as on a button: a screenshot of one page
+    // out of nine should still say which one it is.
+    title: total === 1 ? title : `${title} (${page + 1}/${total})`,
+    url: context.repoUrl,
+    description:
+      page === 0
+        ? table.description
+        : `Captured **${relativeTime(table.capturedAt)}** · most incomplete first · page ${page + 1}/${total}.`,
+    color: PALETTE.idle,
+    sections: [
+      {
+        heading: `Library · share · implemented / discovered · change (${page + 1}/${total})`,
+        text: rows.map((row) => row.text).join("\n"),
+      },
+    ],
+  };
 }
 
 /**
@@ -798,6 +926,9 @@ function comparableLibraries(context: GithubContext): SnapshotRecord | null {
   const index = lastComparableIndex(context.history, context.history.length);
   return index === null ? null : (context.history[index] as SnapshotRecord);
 }
+
+/** Discord allows five buttons in one action row. */
+const PANEL_BUTTONS_PER_ROW = 5;
 
 /** @returns `items` split into arrays of at most `size`, in order. */
 export function chunk<T>(items: readonly T[], size: number): T[][] {
@@ -948,6 +1079,7 @@ function graphPanel(context: GithubContext): Omit<ViewBlock, "footer">[] {
   if (shaderWindow.length > 0) {
     fields.push(chartSection("🎮 GPU shaders", shaderWindow, context.style, 4));
   }
+
   const summary = summarize(libraryWindow);
   const description = body(
     [
@@ -1363,7 +1495,24 @@ export function panelCustomId(panel: GithubPanel, style: ChartStyle, width: numb
 }
 
 /**
- * @returns the panel buttons and the panel selector.
+ * @returns the custom ID that opens `panel` at a given page of its own table.
+ *
+ * A separate prefix rather than a sixth field on `panelCustomId`: the panel buttons
+ * are written by an older build in messages that are already in channels, and making
+ * their IDs five fields forever is what keeps a stored message clickable after a
+ * deploy.
+ */
+export function pageCustomId(
+  panel: GithubPanel,
+  style: ChartStyle,
+  width: number,
+  page: number,
+): string {
+  return `${GITHUB_PREFIX}:page:${panel}:${style}:${width}:${page}`;
+}
+
+/**
+ * @returns the panel buttons, the page buttons and the panel selector.
  *
  * The current panel's button is primary rather than disabled: disabling it would
  * lose the one slot that says where the reader is. Nothing here is restricted to
@@ -1374,21 +1523,32 @@ export function panelCustomId(panel: GithubPanel, style: ChartStyle, width: numb
  * the *message's* width, not the command's: a control that wrote its own width
  * would redraw the graph wider the first time anyone pressed a button, which is
  * exactly how a chart that fits a phone came to overflow one.
+ *
+ * `paging` is what keeps the message under Discord's forty-component ceiling: a
+ * panel that pages shows one table and three navigation buttons instead of one
+ * container per page.
  */
 function componentRows(
   current: GithubPanel,
   style: ChartStyle,
   width: number,
   withAll: boolean,
+  paging?: PanelPaging,
 ): ComponentRows {
-  const buttons = PANELS.map((panel) => ({
+  const buttons: readonly ComponentButton[] = PANELS.map((panel) => ({
     customId: panelCustomId(panel.id, style, width),
     label: panel.label,
     emoji: panel.emoji,
     style: panel.id === current ? ("primary" as const) : ("secondary" as const),
   }));
+  const rows: (readonly ComponentButton[])[] = withAll ? chunk(buttons, PANEL_BUTTONS_PER_ROW) : [];
+  // Only when there is somewhere to go: a `1/1` button is clutter, and its absence
+  // is also what keeps the plain panel row the only row for a small project.
+  if (paging !== undefined && paging.pages > 1) {
+    rows.push(pageButtons(current, style, width, paging));
+  }
   return {
-    buttons: withAll ? chunk(buttons, 5) : [],
+    buttons: rows,
     select: {
       customId: `${GITHUB_PREFIX}:select`,
       placeholder: "Switch panel…",
@@ -1403,38 +1563,104 @@ function componentRows(
   };
 }
 
+/**
+ * @returns previous, position and next, in one row.
+ *
+ * The position is a disabled button rather than a label on the next one: a reader
+ * needs to know how far there is to go, and a button that says `4/9` is the shortest
+ * way to say it that a Components V2 message allows.
+ */
+function pageButtons(
+  panel: GithubPanel,
+  style: ChartStyle,
+  width: number,
+  paging: PanelPaging,
+): readonly ComponentButton[] {
+  const { page, pages } = paging;
+  return [
+    {
+      // `width` is carried for the same reason the panel buttons carry it: paging a
+      // table must not redraw the chart at some other column count, and pressing
+      // `Next` on the libraries panel is still a click on this message.
+      customId: pageCustomId(panel, style, width, Math.max(0, page - 1)),
+      label: "Previous",
+      emoji: "◀️",
+      style: "secondary",
+      // Disabled, not hidden: the row keeps its shape on the first and last page, so
+      // the buttons under the cursor do not move between clicks.
+      disabled: page <= 0,
+    },
+    {
+      customId: pageCustomId(panel, style, width, page),
+      label: `Page ${page + 1}/${pages}`,
+      emoji: "📄",
+      style: "secondary",
+      disabled: true,
+    },
+    {
+      customId: pageCustomId(panel, style, width, Math.min(pages - 1, page + 1)),
+      label: "Next",
+      emoji: "▶️",
+      style: "secondary",
+      disabled: page >= pages - 1,
+    },
+  ];
+}
+
 /** A parsed `/github` component interaction. */
 export interface PanelRequest {
   readonly panel: GithubPanel;
   readonly style: ChartStyle;
   readonly width: number;
+  /** The page asked for; `0` for a panel button, which always opens page one. */
+  readonly page: number;
 }
 
 /**
  * Parses a `/github` custom ID.
  *
- * @returns the panel and chart settings it asked for, or `null` for a custom ID
- * this command did not write — a message from an older version, or another
+ * Handles both shapes this command writes — `github:panel:<panel>:<style>:<width>`
+ * and `github:page:<panel>:<style>:<width>:<page>` — so the handler has one entry
+ * point and cannot forget to carry the page through a re-render.
+ *
+ * @returns the panel, chart settings and page it asked for, or `null` for a custom
+ * ID this command did not write — a message from an older version, or another
  * command's component that happens to start the same way. Returning `null` rather
  * than throwing lets the handler answer politely instead of failing.
  */
 export function parsePanelCustomId(customId: string): PanelRequest | null {
   const parts = customId.split(":");
-  if (parts.length !== 5 || parts[0] !== GITHUB_PREFIX || parts[1] !== "panel") {
+  const [prefix, kind, panel, style, width, page] = parts;
+  const expected = kind === "page" ? 6 : 5;
+  if (parts.length !== expected || prefix !== GITHUB_PREFIX) {
     return null;
   }
-  const [, , panel, style, width] = parts;
+  if (kind !== "panel" && kind !== "page") {
+    return null;
+  }
   if (panel === undefined || !PANEL_IDS.includes(panel as GithubPanel)) {
     return null;
   }
   if (style !== "bars" && style !== "line") {
     return null;
   }
-  const parsed = Number(width);
-  if (!Number.isFinite(parsed) || parsed < 8 || parsed > 48) {
+  const parsedWidth = Number(width);
+  if (!Number.isFinite(parsedWidth) || parsedWidth < 8 || parsedWidth > 48) {
     return null;
   }
-  return { panel: panel as GithubPanel, style, width: Math.trunc(parsed) };
+  // A page number is clamped rather than rejected to the top of the range only: a
+  // stored message can name a page the table has since outgrown, and the view clamps
+  // it again, but a garbage page is a component this command did not write.
+  const parsedPage = page === undefined ? 0 : Number(page);
+  if (!Number.isInteger(parsedPage) || parsedPage < 0 || parsedPage > MAX_PAGE) {
+    return null;
+  }
+  return {
+    panel: panel as GithubPanel,
+    style,
+    width: Math.trunc(parsedWidth),
+    page: parsedPage,
+  };
 }
 
 /** @returns `true` for any component belonging to `/github`. */
