@@ -18,6 +18,7 @@
  *   discord.js;
  * - `github-components.ts` — the one conversion of that view into discord.js
  *   builders, shared by the slash command and the component handler.
+ * - `github-message.ts` — `!g`, the same panels typed as a message prefix.
  */
 export {
   HISTORY_WINDOW,
@@ -110,6 +111,12 @@ export {
   IS_COMPONENTS_V2,
   type ReplyPayload,
 } from "./github-components.js";
+export {
+  GITHUB_MESSAGE_PREFIX,
+  githubMessageHelp,
+  parseGithubMessage,
+  type GithubMessageRequest,
+} from "./github-message.js";
 export type {
   MonitorRecord,
   PendingEvent,

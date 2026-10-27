@@ -42,6 +42,10 @@ import {
 } from "../../src/modules/repository/github-report.view.js";
 import type { RepositoryPullRequest } from "../../src/services/anyps5/repository.types.js";
 import {
+  BLOCK_COMPONENTS,
+  CONTROL_COMPONENTS,
+  MAX_BLOCKS,
+  MAX_COMPONENTS,
   MAX_FIELD,
   panelCustomId,
   parsePanelCustomId,
@@ -49,6 +53,12 @@ import {
   absoluteTime,
 } from "../../src/modules/repository/github-view.js";
 import { renderView } from "../../src/modules/repository/github-components.js";
+import {
+  githubMessageHelp,
+  parseGithubMessage,
+} from "../../src/modules/repository/github-message.js";
+import { GRAPH_WIDTH } from "../../src/modules/repository/github-request.js";
+import { MAX_ROW } from "../../src/modules/repository/repository-chart.js";
 import { ComponentType } from "discord.js";
 import {
   drawColumns,
@@ -497,6 +507,57 @@ describe("buildGithubView", () => {
     expect(total).toBeLessThanOrEqual(40);
   });
 
+  it("budgets fewer blocks than a rejected payload would need", () => {
+    // A guard on the arithmetic itself: 40 components hold five panel buttons, a
+    // selector with five options, and at most three page blocks. If the control count
+    // or the block cost is ever edited, this is where it shows.
+    expect(MAX_BLOCKS).toBe(3);
+    expect(BLOCK_COMPONENTS * MAX_BLOCKS + CONTROL_COMPONENTS).toBeLessThanOrEqual(MAX_COMPONENTS);
+  });
+
+  it("keeps a large library table inside Discord's forty-component cap", () => {
+    // The regression this guards: `paginate` splits by characters only, so a project
+    // with a few hundred libraries paged into more containers than one message may
+    // hold — and Discord rejects such a payload whole instead of shortening it, which
+    // surfaced to the reader as "Discord rejected the request".
+    for (const libraryCount of [3, 50, 150, 400, 1_200]) {
+      const groups = Array.from({ length: libraryCount }, (_unused, index) =>
+        group(`library-${index}`, 100 + index, 1_000 + index),
+      );
+      const history = [snapshot(1, { done: 5_500, total: 11_697, percent: 47.02 }, groups)];
+      const view = buildGithubView(context(history, "libraries"));
+      const payload = renderView(view);
+
+      const rendered = payload.components.map((component) => component.toJSON()) as {
+        components?: { type: number; content?: string; components?: { type: number }[] }[];
+      }[];
+      const nested = (nodes: { components?: { type: number }[] }[] | undefined): number =>
+        (nodes ?? []).reduce(
+          (count, node) =>
+            count + 1 + nested((node as { components?: { type: number }[] }).components),
+          0,
+        );
+      const total = rendered.reduce(
+        (count, component) => count + 1 + nested(component.components),
+        0,
+      );
+
+      expect(total, `${libraryCount} libraries: ${total} components`).toBeLessThanOrEqual(40);
+      // Whatever did not fit is stated rather than silently dropped. A table that fits
+      // in full says nothing, so the notice is only expected when rows were left out —
+      // which is whenever the cap binds *and* the last page ends the table early.
+      if (view.blocks.length === MAX_BLOCKS) {
+        const shown = view.blocks.reduce(
+          (count, block) => count + (block.sections[0]?.text.split("\n").length ?? 0),
+          0,
+        );
+        if (shown < libraryCount) {
+          expect(view.blocks.at(-1)?.description).toContain("do not fit in one message");
+        }
+      }
+    }
+  });
+
   it("keeps every overview section instead of stopping at an embed's field cap", () => {
     // Twenty-four readings give the overview a trend section, a library breakdown and
     // the pace estimate alongside the two headlines — more than a single embed field
@@ -551,9 +612,11 @@ describe("buildGithubView", () => {
   it("marks the current panel and offers the others", () => {
     const view = buildGithubView(context(growth, "libraries"));
     const buttons = view.components.buttons.flat();
+    // The width in each control is the *message's*, not a constant: a click must
+    // redraw the same chart, not a wider one. The context above asks for 16.
     expect(buttons.map((button) => button.customId)).toEqual(
       ["overview", "libraries", "timeline", "graph", "why"].map((panel) =>
-        panelCustomId(panel as GithubPanel, "line", 48),
+        panelCustomId(panel as GithubPanel, "line", 16),
       ),
     );
     expect(buttons.filter((button) => button.style === "primary")).toHaveLength(1);
@@ -838,8 +901,20 @@ describe("/github report", () => {
     // from its own clock and a report is about a window: the readings have to sit in it.
     const at = (row: SnapshotRecord, when: Date): SnapshotRecord => ({ ...row, capturedAt: when });
     const snapshots = [
-      at(snapshot(0, { done: 40, total: 100, percent: 40 }, [group("gpu", 30, 80), group("audio", 10, 20)]), hoursBefore(4)),
-      at(snapshot(0, { done: 46, total: 100, percent: 46 }, [group("gpu", 36, 80), group("audio", 10, 20)]), END),
+      at(
+        snapshot(0, { done: 40, total: 100, percent: 40 }, [
+          group("gpu", 30, 80),
+          group("audio", 10, 20),
+        ]),
+        hoursBefore(4),
+      ),
+      at(
+        snapshot(0, { done: 46, total: 100, percent: 46 }, [
+          group("gpu", 36, 80),
+          group("audio", 10, 20),
+        ]),
+        END,
+      ),
     ];
     const pulls = [
       // Opened and merged inside the window, two hours to merge.
@@ -1016,5 +1091,164 @@ describe("/github report", () => {
     expect(window.from.toISOString()).toBe(hoursBefore(4).toISOString());
     // An unknown choice falls back to the default range rather than throwing.
     expect(reportWindowFor("nonsense", END).from.toISOString()).toBe(hoursBefore(24).toISOString());
+  });
+});
+
+describe("the graph fits a phone", () => {
+  // A phone shows roughly 25 characters of a fenced block before it scrolls, and a
+  // fenced block does not wrap: a row over the budget is a chart that runs off the
+  // screen. `bars` is the wider style because it prepends a `100.00%┫` gutter.
+  const history = Array.from({ length: 40 }, (_, index) =>
+    snapshot(40 - index, { done: 1_000 + index, total: 11_697, percent: 8.55 + index / 100 }),
+  );
+  // The worst case: percentages that print at the full `100.00%` width, so the gutter is
+  // as wide as it can ever be. A chart that fits here fits every reading.
+  const wideHistory = Array.from({ length: 40 }, (_, index) =>
+    snapshot(40 - index, { done: 1_000 + index, total: 1_200, percent: 90.55 + index / 100 }),
+  );
+
+  /** @returns every drawn row of a chart section, fences stripped. */
+  function drawnRows(text: string): string[] {
+    const fenced = text.split("```")[1] ?? "";
+    return fenced.split("\n").filter((line) => line.length > 0);
+  }
+
+  /** @returns the drawn rows of the graph panel, in the given style. */
+  function graphRows(style: "bars" | "line", width: number, source = history): string[] {
+    const view = buildGithubView({
+      fullName: "anyps5/anyps5",
+      repoUrl: "https://github.com/anyps5/anyps5",
+      history: source,
+      latest: source.at(-1) ?? null,
+      panel: "graph",
+      style,
+      width,
+      ownerId: null,
+    });
+    return view.blocks.flatMap((block) => block.sections).flatMap((s) => drawnRows(s.text));
+  }
+
+  it("keeps every row inside the phone's width, even at 100.00% labels", () => {
+    for (const style of ["bars", "line"] as const) {
+      const rows = graphRows(style, GRAPH_WIDTH, wideHistory);
+      expect(rows.length).toBeGreaterThan(0);
+      for (const row of rows) {
+        expect(row.length).toBeLessThanOrEqual(MAX_ROW);
+      }
+    }
+  });
+
+  it("draws one column per reading in both styles", () => {
+    // The gutter is decoration, never a reason to drop readings: `bars` must show the
+    // same window `line` does, which the earlier "carve the gutter out" fix broke.
+    const columns = (style: "bars" | "line"): number => {
+      const rows = graphRows(style, GRAPH_WIDTH);
+      const bottom = rows.at(-1) ?? "";
+      return bottom.replace(/^.*?┫/, "").length;
+    };
+    expect(columns("line")).toBe(GRAPH_WIDTH);
+    expect(columns("bars")).toBe(GRAPH_WIDTH);
+  });
+
+  it("carries the message's width into its buttons, not a constant", () => {
+    // The regression this guards: the first click redrew the graph at 48 columns,
+    // because the controls wrote their own width instead of the message's.
+    const view = buildGithubView({
+      fullName: "anyps5/anyps5",
+      repoUrl: "https://github.com/anyps5/anyps5",
+      history,
+      latest: history.at(-1) ?? null,
+      panel: "overview",
+      style: "line",
+      width: GRAPH_WIDTH,
+      ownerId: null,
+    });
+    const ids = [
+      ...view.components.buttons.flat().map((button) => button.customId),
+      ...(view.components.select?.options.map((option) => option.value) ?? []),
+    ];
+    expect(ids.length).toBeGreaterThan(0);
+    for (const id of ids) {
+      expect(parsePanelCustomId(id)?.width).toBe(GRAPH_WIDTH);
+    }
+  });
+});
+
+describe("!g — the same panels, typed", () => {
+  it("ignores anything that is not a !g invocation", () => {
+    // Every one of these must reach automod and the AI agent untouched. `!government`
+    // is the important one: a bare prefix match would make the bot answer somebody
+    // else's command.
+    for (const content of ["hello", "/github", "!government", " !!g", "g graph", ""]) {
+      expect(parseGithubMessage(content)).toBeNull();
+    }
+  });
+
+  it("reads the panels, their aliases and the chart style", () => {
+    expect(parseGithubMessage("!g")).toEqual({ kind: "panel", panel: "overview", style: "line" });
+    expect(parseGithubMessage("  !g   ")).toEqual({
+      kind: "panel",
+      panel: "overview",
+      style: "line",
+    });
+    expect(parseGithubMessage("!g graph")).toEqual({
+      kind: "panel",
+      panel: "graph",
+      style: "line",
+    });
+    expect(parseGithubMessage("!g GRAPH BARS")).toEqual({
+      kind: "panel",
+      panel: "graph",
+      style: "bars",
+    });
+    // The style is accepted before or after the name: same request, same answer.
+    expect(parseGithubMessage("!g bars graph")).toEqual({
+      kind: "panel",
+      panel: "graph",
+      style: "bars",
+    });
+    expect(parseGithubMessage("!g libs")).toEqual({
+      kind: "panel",
+      panel: "libraries",
+      style: "line",
+    });
+    expect(parseGithubMessage("!g why")).toEqual({ kind: "panel", panel: "why", style: "line" });
+  });
+
+  it("reads a report range and a history count", () => {
+    expect(parseGithubMessage("!g report")).toEqual({ kind: "report", range: "1d", style: "line" });
+    expect(parseGithubMessage("!g report 4h")).toEqual({
+      kind: "report",
+      range: "4h",
+      style: "line",
+    });
+    // An unknown range falls back to the default rather than refusing the request.
+    expect(parseGithubMessage("!g report nonsense")).toEqual({
+      kind: "report",
+      range: "1d",
+      style: "line",
+    });
+    expect(parseGithubMessage("!g history 10")).toEqual({ kind: "history", limit: 10 });
+    // Clamped, not refused: a count above the command's own ceiling prints the ceiling.
+    expect(parseGithubMessage("!g history 999")).toEqual({ kind: "history", limit: 25 });
+    expect(parseGithubMessage("!g history")).toEqual({ kind: "history", limit: 12 });
+    expect(parseGithubMessage("!g history abc")).toEqual({ kind: "history", limit: 12 });
+  });
+
+  it("answers help instead of staying silent on a typo", () => {
+    // Silence is indistinguishable from a bot that is down, which is the report this
+    // command keeps getting.
+    expect(parseGithubMessage("!g libraryy")).toEqual({ kind: "help" });
+    expect(parseGithubMessage("!g help")).toEqual({ kind: "help" });
+  });
+
+  it("documents every form it accepts", () => {
+    // The help text is the contract: a form that parses but is not listed is one
+    // nobody will find.
+    const help = githubMessageHelp("anyps5/anyps5");
+    for (const form of ["libraries", "timeline", "graph", "why", "history", "report"]) {
+      expect(help).toContain(`!g ${form}`);
+    }
+    expect(help).toContain("anyps5/anyps5");
   });
 });

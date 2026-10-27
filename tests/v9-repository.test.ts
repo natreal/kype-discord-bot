@@ -827,6 +827,7 @@ describe("/github interaction acknowledgement", () => {
         getSubcommand: () => subcommand,
         getInteger: () => null,
         getString: () => null,
+        getBoolean: () => null,
       },
       member: null,
       replied: false,
@@ -883,6 +884,8 @@ describe("/github permission surface", () => {
       options: {
         getSubcommand: () => subcommand,
         getInteger: () => null,
+        getString: () => null,
+        getBoolean: () => null,
       },
       member: guildMember,
       replied: false,
@@ -999,6 +1002,8 @@ describe("/github history window", () => {
       options: {
         getSubcommand: () => "history",
         getInteger: () => limit,
+        getBoolean: () => null,
+        getString: () => null,
       },
       member: null,
       replied: false,
@@ -1020,8 +1025,11 @@ describe("/github history window", () => {
     context: CommandExecutionContext;
     history: ReturnType<typeof vi.fn>;
   } {
-    const history = vi.fn(() =>
-      Promise.resolve(Array.from({ length: count }, (_, index) => snapshot(index))),
+    /** A monitor whose `history(limit)` honours the limit, like the real one does. */
+    const history = vi.fn((limit = 0) =>
+      Promise.resolve(
+        Array.from({ length: Math.min(count, limit) }, (_, index) => snapshot(index)),
+      ),
     );
     const context = {
       repositoryMonitor: { fullName: "boykopovar/AnyPS5", history },
@@ -1123,7 +1131,12 @@ describe("/github status pull requests", () => {
     } as unknown as CommandExecutionContext;
     const replies: unknown[] = [];
     const interaction = {
-      options: { getSubcommand: () => "overview", getInteger: () => null, getString: () => null },
+      options: {
+        getSubcommand: () => "overview",
+        getInteger: () => null,
+        getString: () => null,
+        getBoolean: () => null,
+      },
       member: null,
       replied: false,
       deferred: false,

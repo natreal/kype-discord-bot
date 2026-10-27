@@ -39,6 +39,8 @@ import {
   fenceChart,
   formatValue,
   gauge,
+  MAX_ROW,
+  BAR_GUTTER,
   renderSparkline,
   scaleSeries,
   type ChartStyle,
@@ -58,6 +60,46 @@ export const MAX_FIELD = 4_000;
 export const MAX_FIELD_NAME = 256;
 /** Characters allowed in a panel's introduction. */
 export const MAX_DESCRIPTION = 4_096;
+
+/**
+ * Components Discord accepts in one message, from the Components V2 reference:
+ * "Messages allow up to 40 total components".
+ *
+ * The count is of *every* component, not just the top-level ones, so a panel is
+ * budgeted in whole blocks rather than in characters alone.
+ */
+export const MAX_COMPONENTS = 40;
+
+/**
+ * What the buttons and the selector cost: five panel buttons in one action row, the
+ * selector row itself, and the five options inside it.
+ */
+export const CONTROL_COMPONENTS = 5 + 1 + 5;
+
+/**
+ * What one page block costs inside its container, measured against a real paginated
+ * table: the heading, the description, a separator, a heading and a body text display
+ * for the section, then a separator and the footer.
+ *
+ * Taken at the *most expensive* shape. A block with an empty description is one
+ * cheaper, and a body that splits across several text displays is one more per extra
+ * piece; budgeting for the common case keeps that split from pushing a full message
+ * over the cap.
+ */
+export const BLOCK_COMPONENTS = 8;
+
+/**
+ * The most page blocks one message may carry.
+ *
+ * Derived rather than guessed: {@link MAX_COMPONENTS} in total, minus what the buttons
+ * and selector cost, divided by what one block costs. Being one block short is a
+ * shorter table, while being one block over is a reply Discord rejects whole — so the
+ * block cost is taken at its most expensive and the division rounds down.
+ */
+export const MAX_BLOCKS = Math.max(
+  1,
+  Math.floor((MAX_COMPONENTS - CONTROL_COMPONENTS) / BLOCK_COMPONENTS),
+);
 
 /** The panels `/github` can show, and the buttons that switch between them. */
 export type GithubPanel = "overview" | "libraries" | "timeline" | "graph" | "why";
@@ -170,7 +212,7 @@ export function buildGithubView(context: GithubContext): GithubView {
   if (context.latest === null) {
     return {
       blocks: [freshWatchBlock(context)],
-      components: componentRows("overview", context.style, false),
+      components: componentRows("overview", context.style, context.width, false),
     };
   }
   const bodies = panelBody(context);
@@ -178,7 +220,7 @@ export function buildGithubView(context: GithubContext): GithubView {
     // Every block carries the footer, so a multi-block table reads the same on its
     // last page as the overview does.
     blocks: bodies.map((body) => ({ ...body, footer: footerFor(context) })),
-    components: componentRows(context.panel, context.style, true),
+    components: componentRows(context.panel, context.style, context.width, true),
   };
 }
 
@@ -651,23 +693,46 @@ function librariesPanel(context: GithubContext): Omit<ViewBlock, "footer">[] {
     library,
     text: libraryRow(library, analysis.before, movement),
   }));
-  const pages = paginate(rows, MAX_FIELD);
+  const paginated = paginate(rows, MAX_FIELD);
+  // A table with a great many libraries paginates to more blocks than one message can
+  // hold, and Discord rejects such a payload whole rather than shortening it — which is
+  // how the libraries panel came to answer "Discord rejected the request". The cap is on
+  // blocks, not characters, because the component count is what Discord checks.
+  const pages = paginated.slice(0, MAX_BLOCKS);
+  // Counted, not estimated: a reader is told the real number of libraries left out.
+  const omitted = paginated.slice(pages.length).reduce((sum, page) => sum + page.length, 0);
 
-  return pages.map((page, index) => ({
-    title: pages.length === 1 ? title : `${title} (${index + 1}/${pages.length})`,
-    url,
-    description:
-      index === 0
-        ? description
-        : `Captured **${relativeTime(snapshot.capturedAt)}** · most incomplete first.`,
-    color: PALETTE.idle,
-    sections: [
-      {
-        heading: "Library · share · implemented / discovered · change",
-        text: page.map((row) => row.text).join("\n"),
-      },
-    ],
-  }));
+  return pages.map((page, index) => {
+    const last = index === pages.length - 1;
+    // A cut table says so on the page that was cut, and names the way to see the rest:
+    // a reader who is not told would take the shortened table for the whole project.
+    const cut =
+      last && omitted > 0
+        ? `▬ **${formatCount(omitted)} more ${omitted === 1 ? "library" : "libraries"}** do not fit in one message. \`/github report\` charts them by movement.`
+        : "";
+    // A `+` in the counter, so "3/3+" never claims to be the end of a longer table.
+    const counter = omitted > 0 ? `${index + 1}/${pages.length}+` : `${index + 1}/${pages.length}`;
+    return {
+      title: pages.length === 1 && omitted === 0 ? title : `${title} (${counter})`,
+      url,
+      description: body(
+        [
+          index === 0
+            ? description
+            : `Captured **${relativeTime(snapshot.capturedAt)}** · most incomplete first.`,
+          cut,
+        ],
+        MAX_DESCRIPTION,
+      ),
+      color: PALETTE.idle,
+      sections: [
+        {
+          heading: "Library · share · implemented / discovered · change",
+          text: page.map((row) => row.text).join("\n"),
+        },
+      ],
+    };
+  });
 }
 
 /**
@@ -774,8 +839,8 @@ function timelinePanel(context: GithubContext): Omit<ViewBlock, "footer">[] {
     // lane is padded to exactly that and one space separates it from the percentages.
     return (
       `${absoluteTime(snapshot.capturedAt).slice(5, 16)} ` +
-      `${(reading.libraries === null ? "      —" : `${formatValue(reading.libraries.percent, 2).padStart(7, " ")}%`)}` +
-      `${(reading.shaders === null ? "      —" : `${formatValue(reading.shaders.percent, 2).padStart(7, " ")}%`)}` +
+      `${reading.libraries === null ? "      —" : `${formatValue(reading.libraries.percent, 2).padStart(7, " ")}%`}` +
+      `${reading.shaders === null ? "      —" : `${formatValue(reading.shaders.percent, 2).padStart(7, " ")}%`}` +
       ` ${step.padStart(6, " ")}`
     );
   });
@@ -854,7 +919,12 @@ function trimmedHistory(context: GithubContext, limit: number): readonly Snapsho
 function graphPanel(context: GithubContext): Omit<ViewBlock, "footer">[] {
   const libraries = seriesFor(context, "libraries");
   const shaders = seriesFor(context, "shaders");
-  const width = Math.max(8, Math.min(48, Math.trunc(context.width)));
+  // One column per reading, capped so the *widest* row a phone has to show still fits:
+  // `bars` prepends a `100.00%┫` gutter to the columns, which is why the columns are
+  // `MAX_ROW` minus the widest gutter that style can draw. Sizing from the bare columns
+  // is what let the bar chart be the one that ran off the screen.
+  const requested = Math.max(8, Math.min(48, Math.trunc(context.width)));
+  const width = context.style === "bars" ? Math.min(requested, MAX_ROW - BAR_GUTTER) : requested;
   const libraryWindow = libraries.slice(Math.max(0, libraries.length - width));
   const shaderWindow = shaders.slice(Math.max(0, shaders.length - width));
   const title = `${context.fullName} — graph`;
@@ -878,7 +948,6 @@ function graphPanel(context: GithubContext): Omit<ViewBlock, "footer">[] {
   if (shaderWindow.length > 0) {
     fields.push(chartSection("🎮 GPU shaders", shaderWindow, context.style, 4));
   }
-
   const summary = summarize(libraryWindow);
   const description = body(
     [
@@ -1300,10 +1369,20 @@ export function panelCustomId(panel: GithubPanel, style: ChartStyle, width: numb
  * lose the one slot that says where the reader is. Nothing here is restricted to
  * the invoker — this is public project data, and a reply only its author could use
  * would be useless in a channel.
+ *
+ * `width` travels in every custom ID instead of a constant. The chart columns are
+ * the *message's* width, not the command's: a control that wrote its own width
+ * would redraw the graph wider the first time anyone pressed a button, which is
+ * exactly how a chart that fits a phone came to overflow one.
  */
-function componentRows(current: GithubPanel, style: ChartStyle, withAll: boolean): ComponentRows {
+function componentRows(
+  current: GithubPanel,
+  style: ChartStyle,
+  width: number,
+  withAll: boolean,
+): ComponentRows {
   const buttons = PANELS.map((panel) => ({
-    customId: panelCustomId(panel.id, style, 48),
+    customId: panelCustomId(panel.id, style, width),
     label: panel.label,
     emoji: panel.emoji,
     style: panel.id === current ? ("primary" as const) : ("secondary" as const),
@@ -1315,7 +1394,7 @@ function componentRows(current: GithubPanel, style: ChartStyle, withAll: boolean
       placeholder: "Switch panel…",
       options: PANELS.map((panel) => ({
         label: panel.label,
-        value: panelCustomId(panel.id, style, 48),
+        value: panelCustomId(panel.id, style, width),
         description: panel.blurb,
         emoji: panel.emoji,
         selected: panel.id === current,

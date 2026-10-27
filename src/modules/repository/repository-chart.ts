@@ -149,9 +149,9 @@ export function renderSparkline(
  * @returns the chart as a fenced block, in the style the reader asked for.
  *
  * `bars` adds a labelled gutter (`┫` at the top, middle and bottom of the scale);
- * `blocks` and `line` keep the bare columns, because the legend beneath them
- * already carries the numbers. All three are one drawing with two decorations,
- * not three charts with three chances to disagree with each other.
+ * `line` keeps the bare columns, because the legend beneath already carries the
+ * numbers. Both are one drawing with one decoration, not two charts with two chances
+ * to disagree — the drawing, and therefore the number of readings, is identical.
  */
 export function fenceChart(
   style: ChartStyle,
@@ -167,20 +167,51 @@ export function fenceChart(
 /**
  * @returns the gutter rows of a bar chart: each label right-aligned beside a `┫`
  * spine, then the bottom axis on the last label's row.
+ *
+ * The gutter is *prepended* to the columns rather than carved out of them. Carving
+ * would be wrong twice over: the columns are the data, and shrinking them by exactly
+ * the gutter would make a `bars` chart draw five fewer readings than the same chart
+ * in `line`; and a one-reading chart would lose almost all of its grid.
+ *
+ * The cost is a row `gutter` characters wider than the bare columns, so the graph is
+ * sized from {@link MAX_ROW} minus that gutter. A fenced block scrolls rather than
+ * wraps, so a row over the budget runs off the edge of a phone.
  */
 function axisRows(scale: readonly [string, string, string], rows: readonly string[]): string[] {
   const [bottom = "", middle = "", top = ""] = scale;
   const width = Math.max(...rows.map((row) => row.length), 1);
-  // The gutter is as wide as the widest label plus a space, so the spine aligns.
-  const gutter = Math.max(top.length, bottom.length, middle.length) + 1;
-  const spine = (text: string): string => `${text.padStart(gutter - 1, " ")}┫`;
-  const tail = " ".repeat(Math.max(0, width - 3));
-  return [
-    `${spine(top)}${tail}`,
-    `${spine(middle)}${tail}`,
-    `${spine(bottom)}${"_".repeat(width)}`,
-  ];
+  const gutter = gutterFor(scale);
+  const spine = (text: string): string => text.padStart(gutter - 1, " ") + "┫";
+  const tail = " ".repeat(width);
+  return [spine(top) + tail, spine(middle) + tail, spine(bottom) + "_".repeat(width)];
 }
+
+/**
+ * Characters a chart row may occupy before a phone scrolls it sideways.
+ *
+ * One number, used by the command and by {@link gutterFor}: the width the command
+ * passes and the gutter a `bars` chart adds are chosen so the widest row either style
+ * can produce stays inside it.
+ */
+export const MAX_ROW = 24;
+
+/** @returns the gutter width a `bars` chart sized for these labels will add. */
+export function gutterFor(scale: readonly [string, string, string] | null): number {
+  if (scale === null) {
+    return 1;
+  }
+  const [bottom = "", middle = "", top = ""] = scale;
+  return Math.max(top.length, bottom.length, middle.length) + 1;
+}
+
+/**
+ * The widest gutter a percentage chart can draw: `100.00%` — five characters of number
+ * plus `%` — then the spine, then the single space that separates it from the first
+ * column. Sizing a `bars` chart from the labels it happens to draw would make the same
+ * command produce a narrower chart on a project at 34% than at 100%, so the budget uses
+ * the worst case instead.
+ */
+export const BAR_GUTTER = "100.00%┫".length + 1;
 
 /** @returns a progress gauge, `fraction` of `width` blocks. */
 export function gauge(fraction: number, width: number): string {

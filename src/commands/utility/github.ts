@@ -35,39 +35,29 @@ import { defineSlashCommand } from "../define.js";
 import type { CommandExecutionContext } from "../context.js";
 import { brandedEmbed, errorEmbed } from "../../utils/presenters.js";
 import { AppError, toError } from "../../utils/errors.js";
+import type { GithubPanel } from "../../modules/repository/github-view.js";
 import {
-  buildGithubView,
-  type GithubContext,
-  type GithubPanel,
-} from "../../modules/repository/github-view.js";
-import {
-  buildReportStats,
-  reportWindowFor,
   REPORT_RANGES,
+  type ReportRangeId,
 } from "../../modules/repository/repository-report.analytics.js";
-import { renderReport } from "../../modules/repository/github-report.view.js";
-import { renderView, type ReplyPayload } from "../../modules/repository/github-components.js";
+import {
+  GRAPH_WIDTH,
+  renderGithubHistoryRows,
+  renderGithubPanel,
+  renderGithubReport,
+  type GithubAnswer,
+} from "../../modules/repository/github-request.js";
 import type { ChartStyle } from "../../modules/repository/repository-chart.js";
 import type { RepositoryMonitorService } from "../../modules/repository/repository.service.js";
 
 /**
- * Snapshots read per render.
- *
- * The storage window, not a display limit: the trend fields and the decomposition
- * want as much history as the monitor keeps, and each panel trims what it draws.
- */
-const HISTORY_ROWS = 72;
-
-/**
  * Rows `/github history` prints at most. The monitor records one snapshot an hour, so
  * 25 is "a day of history plus one" rather than the whole archive — an embed that grows
- * without bound is a message Discord eventually refuses. The window above is larger on
- * purpose: reading more history is what lets a trend see past the rows it prints.
+ * without bound is a message Discord eventually refuses. `renderGithubHistory` reads the
+ * full window on purpose: reading more history is what lets a trend see past the rows
+ * it prints, and it trims to the limit itself.
  */
 const HISTORY_LIMIT_MAX = 25;
-
-/** Columns the graph draws: one per snapshot, at a width that fits a phone. */
-const GRAPH_WIDTH = 24;
 
 /** Panels that are their own subcommand, and the option that pins one. */
 const PANEL_CHOICES: readonly { readonly name: string; readonly value: GithubPanel }[] = [
@@ -97,6 +87,24 @@ function withStyle(sub: SlashCommandSubcommandBuilder): SlashCommandSubcommandBu
   );
 }
 
+/**
+ * @returns `sub` with a `private` flag that hides the answer from the channel.
+ *
+ * The panels are public project statistics and are answered publicly by default —
+ * a channel that accrues one hidden reply per reader would be a channel nobody else
+ * can follow. Deciding per invocation, rather than deployment-wide, is what lets the
+ * same command serve a public project feed and a reader who only wants a number for
+ * themselves: `private:true` answers ephemerally, and the buttons inside it keep
+ * working because Discord keeps the message for the invoker.
+ */
+function withVisibility(sub: SlashCommandSubcommandBuilder): SlashCommandSubcommandBuilder {
+  return sub.addBooleanOption((option) =>
+    option
+      .setName("private")
+      .setDescription("Only you see the answer (default: everyone in the channel does)."),
+  );
+}
+
 export default defineSlashCommand({
   meta: {
     name: "github",
@@ -122,53 +130,71 @@ export default defineSlashCommand({
     .setName("github")
     .setDescription("Show the implementation progress of the watched GitHub project.")
     .addSubcommand((sub) =>
-      withStyle(
-        sub
-          .setName("overview")
-          .setDescription("Both sections, the pace and the library breakdown."),
+      withVisibility(
+        withStyle(
+          sub
+            .setName("overview")
+            .setDescription("Both sections, the pace and the library breakdown."),
+        ),
       ),
     )
     .addSubcommand((sub) =>
-      withStyle(sub.setName("libraries").setDescription("Every library, and how each one moved.")),
-    )
-    .addSubcommand((sub) =>
-      sub.setName("timeline").setDescription("The last recorded readings, newest first."),
-    )
-    .addSubcommand((sub) =>
-      withStyle(
-        sub.setName("graph").setDescription("The implementation trend drawn as a text chart."),
+      withVisibility(
+        withStyle(
+          sub.setName("libraries").setDescription("Every library, and how each one moved."),
+        ),
       ),
     )
     .addSubcommand((sub) =>
-      sub
-        .setName("why")
-        .setDescription(
-          "Explain why the library share moved — work, or newly discovered functions.",
-        ),
+      withVisibility(
+        sub.setName("timeline").setDescription("The last recorded readings, newest first."),
+      ),
     )
     .addSubcommand((sub) =>
-      sub
-        .setName("history")
-        .setDescription("The raw stored snapshots, oldest first.")
-        .addIntegerOption((option) =>
-          option
-            .setName("limit")
-            .setDescription(`How many snapshots to list (1-${HISTORY_LIMIT_MAX}, default 12).`)
-            .setMinValue(1)
-            .setMaxValue(HISTORY_LIMIT_MAX),
+      withVisibility(
+        withStyle(
+          sub.setName("graph").setDescription("The implementation trend drawn as a text chart."),
         ),
+      ),
     )
     .addSubcommand((sub) =>
-      withStyle(
+      withVisibility(
         sub
-          .setName("report")
-          .setDescription("A paged report over a window: counts, rates, review time, libraries.")
-          .addStringOption((option) =>
-            option
-              .setName("range")
-              .setDescription("How far back to report (default: 1 day).")
-              .addChoices(...REPORT_RANGES.map((range) => ({ name: range.label, value: range.id }))),
+          .setName("why")
+          .setDescription(
+            "Explain why the library share moved — work, or newly discovered functions.",
           ),
+      ),
+    )
+    .addSubcommand((sub) =>
+      withVisibility(
+        sub
+          .setName("history")
+          .setDescription("The raw stored snapshots, oldest first.")
+          .addIntegerOption((option) =>
+            option
+              .setName("limit")
+              .setDescription(`How many snapshots to list (1-${HISTORY_LIMIT_MAX}, default 12).`)
+              .setMinValue(1)
+              .setMaxValue(HISTORY_LIMIT_MAX),
+          ),
+      ),
+    )
+    .addSubcommand((sub) =>
+      withVisibility(
+        withStyle(
+          sub
+            .setName("report")
+            .setDescription("A paged report over a window: counts, rates, review time, libraries.")
+            .addStringOption((option) =>
+              option
+                .setName("range")
+                .setDescription("How far back to report (default: 1 day).")
+                .addChoices(
+                  ...REPORT_RANGES.map((range) => ({ name: range.label, value: range.id })),
+                ),
+            ),
+        ),
       ),
     )
     .addSubcommand((sub) =>
@@ -184,7 +210,12 @@ export default defineSlashCommand({
     // Deliberately *not* deferred as Components V2: `refresh`, `history` and the error
     // paths reply with an embed, and a V2 message cannot carry one. Only the panel path
     // sets the flag, on the edit that replaces this deferral.
-    await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+    //
+    // The visibility is read *before* the deferral, because the flag is part of the
+    // acknowledgement: it cannot be changed on a later `editReply`.
+    await interaction.deferReply({
+      flags: isPrivate(interaction) ? MessageFlags.Ephemeral : undefined,
+    });
 
     const monitor = context.repositoryMonitor;
     if (!monitor) {
@@ -220,35 +251,27 @@ export default defineSlashCommand({
 /**
  * Renders one panel and replies with it.
  *
- * The whole history is read at once and handed to the view, which decides what each
- * panel needs: the overview wants the latest two readings, the graph wants the
- * window, `why` wants the last comparable pair. Fetching per panel would put that
- * choice in two places and let them drift.
+ * The reading and the building live in `renderGithubPanel`, which `!g` also calls:
+ * one renderer is what keeps a typed panel identical to a clicked one.
  */
 async function handlePanel(
   interaction: ChatInputCommandInteraction,
   monitor: RepositoryMonitorService,
   panel: GithubPanel,
 ): Promise<void> {
-  const style = readStyle(interaction);
-  const history = await monitor.history(HISTORY_ROWS);
-  const viewContext: GithubContext = {
-    fullName: monitor.fullName,
-    repoUrl: `https://github.com/${monitor.fullName}`,
-    history,
-    latest: history.at(-1) ?? null,
-    panel,
-    style,
-    width: GRAPH_WIDTH,
-    // Null, not thrown, when the interaction carries no user: the id only gates the
-    // panel buttons a reader may press, and a missing one should cost those buttons
-    // rather than the whole answer.
-    ownerId: interaction.user?.id ?? null,
-  };
-
-  // A fresh watch is answered by the view itself, with an embed that explains why it
-  // is empty instead of showing zeroes that would read as "nothing implemented".
-  await respond(interaction, renderView(buildGithubView(viewContext)));
+  await respond(
+    interaction,
+    await renderGithubPanel({
+      monitor,
+      panel,
+      style: readStyle(interaction),
+      // Null, not thrown, when the interaction carries no user: the id only gates the
+      // panel buttons a reader may press, and a missing one should cost those buttons
+      // rather than the whole answer.
+      ownerId: interaction.user?.id ?? null,
+      width: GRAPH_WIDTH,
+    }),
+  );
 }
 
 /**
@@ -263,19 +286,40 @@ function readStyle(interaction: ChatInputCommandInteraction): ChartStyle {
 }
 
 /**
- * Replies with a rendered view.
+ * @returns true when this invocation asked to be answered privately.
+ *
+ * `refresh` has no `private` option — it is a staff action whose result is a single
+ * line — so a missing option reads as `false`, which is the public default the
+ * panels use. Reading it through the option name rather than the subcommand keeps
+ * one rule for every subcommand that has it.
+ */
+function isPrivate(interaction: ChatInputCommandInteraction): boolean {
+  return interaction.options.getBoolean("private") ?? false;
+}
+
+/**
+ * Replies with a rendered answer.
  *
  * A Components V2 message holds forty components, and one panel is a container of
  * text blocks plus two rows, so the old "too many embeds" ceiling is gone: the viewer
  * no longer has to be told to pick a shorter panel. `renderView` refuses a text block
  * over Discord's limit rather than sending a payload that would be rejected whole.
+ *
+ * An answer that is prose — an empty window, a help list — keeps the embed shape the
+ * deferral already assumed, because that is what a single line of text is best
+ * carried by.
  */
 async function respond(
   interaction: ChatInputCommandInteraction,
-  view: ReplyPayload,
+  answer: GithubAnswer,
+  title = "GitHub monitor",
 ): Promise<void> {
+  if (answer.kind === "text") {
+    await interaction.editReply({ embeds: [brandedEmbed(title).setDescription(answer.text)] });
+    return;
+  }
   await interaction.editReply({
-    components: view.components,
+    components: answer.payload.components,
     flags: MessageFlags.IsComponentsV2,
   });
 }
@@ -286,43 +330,29 @@ async function handleHistory(
   monitor: RepositoryMonitorService,
 ): Promise<void> {
   // Discord enforces the option's 1-25 range, but the value is still user input:
-  // clamping here keeps "at most 25 rows" true for a stale client or a replayed
-  // payload, and the fetch below is capped for the same reason.
+  // clamped here keeps "at most 25 rows" true for a stale client or a replayed
+  // payload, and the shared renderer clamps again for `!g history`.
   const requested = interaction.options.getInteger("limit") ?? 12;
   const limit = Math.min(requested, HISTORY_LIMIT_MAX);
+  // The read is capped at the ceiling rather than at the requested count, so one query
+  // serves every limit; the rows printed are then the last `limit` of them.
   const history = (await monitor.history(HISTORY_LIMIT_MAX)).slice(-limit);
-  if (history.length === 0) {
-    await interaction.editReply({
-      embeds: [
-        brandedEmbed(`${monitor.fullName} — history`).setDescription(
-          "Nothing recorded yet. Run `/github refresh` to take the first snapshot.",
-        ),
-      ],
-    });
-    return;
-  }
-
-  const lines = history.map((snapshot) => {
-    const epoch = Math.floor(snapshot.capturedAt.getTime() / 1_000);
-    const libraries = percentCell(snapshot.state.libraryPercent);
-    const shaders = percentCell(snapshot.state.shaderPercent);
-    return `<t:${epoch}:f> · libraries ${libraries} · shaders ${shaders}`;
-  });
+  // An empty watch has its own sentence rather than a blank embed: `setDescription`
+  // refuses an empty string, and "nothing recorded" is a real state worth naming.
+  const lines =
+    history.length === 0
+      ? "Nothing recorded yet. Run `/github refresh` to take the first snapshot."
+      : renderGithubHistoryRows(history);
 
   await interaction.editReply({
     embeds: [
       brandedEmbed(`${monitor.fullName} — ${history.length} snapshot(s)`)
-        .setDescription(lines.join("\n"))
+        .setDescription(lines)
         .setFooter({
           text: "Percentages are the project's published figures, stored per refresh.",
         }),
     ],
   });
-}
-
-/** @returns a percentage, keeping "no reading" distinct from 0%. */
-function percentCell(value: number | null): string {
-  return value === null ? "—" : `${value}%`;
 }
 
 /**
@@ -337,45 +367,11 @@ async function handleReport(
   monitor: RepositoryMonitorService,
 ): Promise<void> {
   const rangeId = interaction.options.getString("range") ?? "1d";
-  const now = new Date();
-  const window = reportWindowFor(rangeId, now);
-  const data = await monitor.reportWindow(window.from, window.to);
-
-  if (data.snapshots.length === 0 && data.pullRequests.length === 0) {
-    await interaction.editReply({
-      embeds: [
-        brandedEmbed(`${monitor.fullName} — report`).setDescription(
-          "Nothing is recorded in that window yet. The monitor fills in as it refreshes; " +
-            "`/github refresh` takes a snapshot now.",
-        ),
-      ],
-    });
-    return;
-  }
-
-  const stats = buildReportStats({
-    rangeId,
-    window: { from: data.from, to: data.to },
-    snapshots: data.snapshots,
-    pullRequests: data.pullRequests,
-    commits: data.commits.map((commit) => ({
-      at: commit.committedAt,
-      author: commit.author,
-      message: commit.message,
-    })),
+  const answer = await renderGithubReport({
+    monitor,
+    range: rangeId as ReportRangeId,
   });
-
-  await interaction.editReply({
-    components: renderView(
-      renderReport({
-        stats,
-        fullName: monitor.fullName,
-        repoUrl: `https://github.com/${monitor.fullName}`,
-        page: "overview",
-      }),
-    ).components,
-    flags: MessageFlags.IsComponentsV2,
-  });
+  await respond(interaction, answer, `${monitor.fullName} — report`);
 }
 
 /** `/github refresh` — a snapshot now, with the same announcement rules. */

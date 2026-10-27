@@ -537,8 +537,24 @@ export class InteractionHandler {
     }
 
     await interaction.deferUpdate();
+    // The read is separated from the render so a failure says which half broke: a
+    // database outage and a panel that no longer fits the message are different
+    // problems, and telling a reader "try again" for the second one was misleading.
+    let history: Awaited<ReturnType<RepositoryMonitorService["history"]>>;
     try {
-      const history = await monitor.history(GITHUB_HISTORY_ROWS);
+      history = await monitor.history(GITHUB_HISTORY_ROWS);
+    } catch (error) {
+      this.logger.error("Failed to read /github history for a panel", error, {
+        customId: interaction.customId,
+      });
+      await this.safeReply(
+        interaction,
+        "The project history could not be read. Try `/github` again in a moment.",
+      );
+      return;
+    }
+
+    try {
       const payload = renderView(
         buildGithubView({
           fullName: monitor.fullName,
@@ -558,8 +574,19 @@ export class InteractionHandler {
     } catch (error) {
       this.logger.error("Failed to render a /github panel", error, {
         customId: interaction.customId,
+        snapshots: history.length,
+        panel: request.panel,
+        style: request.style,
+        width: request.width,
       });
-      await this.safeReply(interaction, "That panel could not be loaded. Try `/github` again.");
+      // An API error here is almost always the payload being refused — too many
+      // components — rather than Discord being briefly unavailable, so the copy names
+      // the table's size instead of asking for a pointless retry.
+      const reason =
+        error instanceof DiscordAPIError
+          ? "Discord refused the panel message, which is usually a table too large to send."
+          : "The panel could not be built.";
+      await this.safeReply(interaction, `${reason} Try \`/github report\` for the same data.`);
     }
   }
 

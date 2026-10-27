@@ -15,13 +15,15 @@
  * - the bot's own messages, webhooks and DMs are skipped here rather than in the
  *   evaluator: they never deserve a Discord API round trip.
  */
-import { PermissionFlagsBits } from "discord.js";
+import { MessageFlags, PermissionFlagsBits } from "discord.js";
 import type { Message } from "discord.js";
 
 import { defineEvent } from "./event.types.js";
 import type { AutomodMessageObservation } from "../modules/automod/index.js";
 import type { AppServices } from "../services/container.js";
 import { AiAgentService } from "../modules/ai/ai-agent.service.js";
+import { renderGithubMessage } from "../modules/repository/github-request.js";
+import { parseGithubMessage } from "../modules/repository/github-message.js";
 import {
   intentNote,
   replyRequest,
@@ -87,6 +89,13 @@ export default defineEvent({
 
     const outcome = await automod.observe(observation);
     if (outcome.verdict !== "triggered") {
+      // `!g` is answered *after* automod, never before it: a member spamming the
+      // prefix must still be caught by the rules, and a handler that replied first
+      // would give them a free way to keep the channel busy. It also runs before the
+      // keyword agent, so `!g graph` is a chart rather than a request to the model.
+      if (await maybeAnswerGithub(message, services)) {
+        return;
+      }
       await maybeInvokeAi(message, services);
       return;
     }
@@ -158,6 +167,73 @@ async function maybeScheduleBumpReminder(
       messageId: message.id,
       error: error instanceof Error ? error.message : String(error),
     });
+  }
+}
+
+/**
+ * Answers `!g …` and reports whether it did.
+ *
+ * The slash command is the primary surface; this is the same panels for a channel
+ * where the command tree has not reached yet, or for a reader who would rather type.
+ * Both go through `renderGithubMessage`, so a typed panel and a clicked one cannot
+ * show different numbers.
+ *
+ * @returns `true` when the message was a `!g` invocation and an answer was sent, so
+ * the caller stops — the keyword agent must not also treat it as a prompt. `false`
+ * leaves the message untouched for automod's verdict and for the agent.
+ *
+ * Every failure is logged and answered, never thrown: `messageCreate` is the automod
+ * hot path, and an exception here would run while a sanction was being recorded.
+ */
+async function maybeAnswerGithub(message: Message<true>, services: AppServices): Promise<boolean> {
+  if (!message.content) {
+    return false;
+  }
+  // Checked before any I/O: the overwhelming majority of messages are not `!g`, and
+  // the parser is pure, so a non-invocation costs one string comparison.
+  const probe = parseGithubMessage(message.content);
+  if (probe === null) {
+    return false;
+  }
+
+  const monitor = services.repositoryMonitor;
+  if (!monitor) {
+    await message
+      .reply("The repository monitor is not running in this process.")
+      .catch(() => undefined);
+    return true;
+  }
+
+  try {
+    const answer = await renderGithubMessage({
+      content: message.content,
+      monitor,
+      ownerId: message.author.id,
+    });
+    if (answer === null) {
+      return false;
+    }
+    if (answer.kind === "text") {
+      await message.reply({ content: answer.text, allowedMentions: { repliedUser: false } });
+      return true;
+    }
+    // Components V2 carries the same containers and buttons the slash command sends,
+    // so the panels stay clickable from a typed invocation as well.
+    await message.reply({
+      components: answer.payload.components,
+      flags: MessageFlags.IsComponentsV2,
+      allowedMentions: { repliedUser: false },
+    });
+    return true;
+  } catch (error) {
+    services.logger.error("`!g` could not answer", error, {
+      guildId: message.guild.id,
+      messageId: message.id,
+    });
+    await message
+      .reply("That panel could not be built. Try `/github` instead.")
+      .catch(() => undefined);
+    return true;
   }
 }
 
