@@ -90,18 +90,19 @@ function withStyle(sub: SlashCommandSubcommandBuilder): SlashCommandSubcommandBu
 /**
  * @returns `sub` with a `private` flag that hides the answer from the channel.
  *
- * The panels are public project statistics and are answered publicly by default —
- * a channel that accrues one hidden reply per reader would be a channel nobody else
- * can follow. Deciding per invocation, rather than deployment-wide, is what lets the
- * same command serve a public project feed and a reader who only wants a number for
- * themselves: `private:true` answers ephemerally, and the buttons inside it keep
- * working because Discord keeps the message for the invoker.
+ * The panels are project statistics, and the default is now to keep them to the
+ * invoker: a reader checking a number usually wants the number, not to bury the
+ * conversation under a table they did not ask the channel for. `private:false` is
+ * the opt-in for posting one to everyone, which is what a public project feed does.
+ * Deciding per invocation, rather than deployment-wide, is what lets the same command
+ * serve both: the buttons inside an ephemeral answer keep working because Discord
+ * keeps that message for the invoker.
  */
 function withVisibility(sub: SlashCommandSubcommandBuilder): SlashCommandSubcommandBuilder {
   return sub.addBooleanOption((option) =>
     option
       .setName("private")
-      .setDescription("Only you see the answer (default: everyone in the channel does)."),
+      .setDescription("Only you see the answer (default). Set false to post it to the channel."),
   );
 }
 
@@ -290,15 +291,16 @@ function readStyle(interaction: ChatInputCommandInteraction): ChartStyle {
 }
 
 /**
- * @returns true when this invocation asked to be answered privately.
+ * @returns true when this invocation should be answered privately.
  *
  * `refresh` has no `private` option — it is a staff action whose result is a single
- * line — so a missing option reads as `false`, which is the public default the
+ * line — so a missing option reads as `true`, which is the ephemeral default the
  * panels use. Reading it through the option name rather than the subcommand keeps
- * one rule for every subcommand that has it.
+ * one rule for every subcommand: nothing this command says reaches the channel
+ * unless the invoker asked for it.
  */
 function isPrivate(interaction: ChatInputCommandInteraction): boolean {
-  return interaction.options.getBoolean("private") ?? false;
+  return interaction.options.getBoolean("private") ?? true;
 }
 
 /**
