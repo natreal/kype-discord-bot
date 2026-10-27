@@ -24,6 +24,7 @@
  * typo that produces no reply is indistinguishable from a bot that is down.
  */
 import { REPORT_RANGES, type ReportRangeId } from "./repository-report.analytics.js";
+import { PANEL_WINDOWS, type PanelWindowId } from "./repository-window.js";
 import type { ChartStyle } from "./repository-chart.js";
 import type { GithubPanel } from "./github-view.js";
 
@@ -32,7 +33,13 @@ export const GITHUB_MESSAGE_PREFIX = "!g";
 
 /** What a parsed `!g` invocation asks for. */
 export type GithubMessageRequest =
-  | { readonly kind: "panel"; readonly panel: GithubPanel; readonly style: ChartStyle }
+  | {
+      readonly kind: "panel";
+      readonly panel: GithubPanel;
+      readonly style: ChartStyle;
+      /** The window named by a trailing word, or absent for the default. */
+      readonly window?: PanelWindowId;
+    }
   | { readonly kind: "report"; readonly range: ReportRangeId; readonly style: ChartStyle }
   | { readonly kind: "history"; readonly limit: number }
   | { readonly kind: "help" };
@@ -88,8 +95,20 @@ export function parseGithubMessage(content: string): GithubMessageRequest | null
   // The style may appear anywhere after the panel name: `!g graph bars` and
   // `!g bars graph` are the same request, and only one of them is worth refusing.
   const style: ChartStyle = words.includes("bars") ? "bars" : "line";
-  // Dropped before the name is looked up, so the style word cannot be mistaken for it.
-  const named = words.filter((word) => word !== "bars" && word !== "line");
+  // A window is read off the same table the slash command's choices come from, so the
+  // two surfaces cannot drift apart.
+  const chosenWindow = words
+    .map((word) => PANEL_WINDOWS.find((window) => window.id === word))
+    .find((window) => window !== undefined);
+  // Both are dropped before the name is looked up: `!g bars graph` already worked, and
+  // `!g 1h graph` must, or a leading window would be read as a misspelt panel and be
+  // answered with help.
+  const named = words.filter(
+    (word) =>
+      word !== "bars" &&
+      word !== "line" &&
+      PANEL_WINDOWS.every((window) => window.id !== word),
+  );
   const firstNamed = named[0] ?? "";
 
   if (firstNamed === "report") {
@@ -100,7 +119,15 @@ export function parseGithubMessage(content: string): GithubMessageRequest | null
   }
 
   const panel = PANEL_ALIASES.find((entry) => entry.words.includes(firstNamed));
-  return panel === undefined ? { kind: "help" } : { kind: "panel", panel: panel.panel, style };
+  if (panel === undefined) {
+    return { kind: "help" };
+  }
+  return {
+    kind: "panel",
+    panel: panel.panel,
+    style,
+    ...(chosenWindow === undefined ? {} : { window: chosenWindow.id }),
+  };
 }
 
 /** @returns the report range a word names, defaulting to `1d` like the command. */
@@ -130,10 +157,12 @@ export function githubMessageHelp(fullName: string): string {
     `${GITHUB_MESSAGE_PREFIX} timeline            the last readings, newest first`,
     `${GITHUB_MESSAGE_PREFIX} graph               the trend as a text chart`,
     `${GITHUB_MESSAGE_PREFIX} graph bars          the same, on a labelled scale`,
+    `${GITHUB_MESSAGE_PREFIX} graph 1h            the same over a named window`,
     `${GITHUB_MESSAGE_PREFIX} why                 why the share moved`,
     `${GITHUB_MESSAGE_PREFIX} history 10          the last 10 stored snapshots`,
     `${GITHUB_MESSAGE_PREFIX} report              the last day at a glance`,
     `${GITHUB_MESSAGE_PREFIX} report 4h           4h, 12h, 1d, 3d or 7d`,
+    `${GITHUB_MESSAGE_PREFIX}                      windows: 15m, 1h, 6h, 24h, all`,
     "```",
     `-# ${fullName} · the same figures as \`/github\`, read from the project's progress.json`,
   ].join("\n");

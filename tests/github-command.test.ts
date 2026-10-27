@@ -57,6 +57,14 @@ import {
   parseGithubMessage,
 } from "../../src/modules/repository/github-message.js";
 import { GRAPH_WIDTH } from "../../src/modules/repository/github-request.js";
+import {
+  DEFAULT_PANEL_WINDOW,
+  PANEL_WINDOWS,
+  averageReadings,
+  panelWindow,
+  windowReadings,
+  type PanelWindowId,
+} from "../../src/modules/repository/repository-window.js";
 import { MAX_ROW } from "../../src/modules/repository/repository-chart.js";
 import { ComponentType } from "discord.js";
 import {
@@ -432,7 +440,11 @@ describe("buildGithubView", () => {
   function context(
     history: readonly SnapshotRecord[],
     panel: GithubPanel,
-    overrides: { readonly width?: number; readonly ownerId?: string | null } = {},
+    overrides: {
+      readonly width?: number;
+      readonly ownerId?: string | null;
+      readonly window?: PanelWindowId;
+    } = {},
   ) {
     return {
       fullName: "anyps5/anyps5",
@@ -443,6 +455,10 @@ describe("buildGithubView", () => {
       style: "line" as const,
       width: overrides.width ?? 16,
       ownerId: overrides.ownerId === undefined ? "user-1" : overrides.ownerId,
+      // The fixtures are days apart, so `all` is the window that shows the history each
+      // test wrote. Left unset, the default quarter hour would clip them all and these
+      // tests would be asserting on an empty chart instead of on the drawing.
+      window: overrides.window ?? "all",
     };
   }
 
@@ -756,6 +772,8 @@ describe("buildGithubView — timeline and library movement", () => {
       style: "line" as const,
       width: 16,
       ownerId: null,
+      // The fixtures are days apart: `all` is the window that actually shows them.
+      window: "all" as const,
     };
   }
 
@@ -1042,7 +1060,12 @@ describe("panel custom IDs", () => {
     expect(parsePanelCustomId("github:page:libraries:line:24:1.5")).toBeNull();
     expect(parsePanelCustomId("github:page:libraries:line:24:1000")).toBeNull();
     expect(parsePanelCustomId("github:page:libraries:line:24")).toBeNull();
-    expect(parsePanelCustomId("github:page:libraries:line:24:2:extra")).toBeNull();
+    // A trailing segment is a window, not garbage: a word this build does not offer is
+    // read as the default rather than rejected, so a message left over from another
+    // build's choice list still opens instead of reporting itself as unsupported.
+    expect(parsePanelCustomId("github:page:libraries:line:24:2:1h")?.window).toBe("1h");
+    expect(parsePanelCustomId("github:page:libraries:line:24:2:nonsense")?.window).toBe("15m");
+    expect(parsePanelCustomId("github:page:libraries:line:24:2:1h:extra")).toBeNull();
   });
 
   it("accepts only its own namespace", () => {
@@ -1294,6 +1317,118 @@ describe("/github report", () => {
   });
 });
 
+describe("panel windows", () => {
+  const NOW = new Date("2026-10-27T12:00:00.000Z");
+
+  /** @returns one reading every 15 minutes, `count` of them, ending at `NOW`. */
+  const quarterHourly = (count: number, percent = (index: number) => 40 + index * 0.5) =>
+    Array.from({ length: count }, (_, index) => ({
+      capturedAt: new Date(NOW.getTime() - (count - 1 - index) * 15 * 60_000),
+      percent: percent(index),
+    }));
+
+  it("offers every window the command and the prefix agree on", () => {
+    // The slash choices and the `!g` words are built from this one list, so a window
+    // added here cannot exist on one surface and not the other.
+    expect(PANEL_WINDOWS.map((window) => window.id)).toEqual(["15m", "1h", "6h", "24h", "all"]);
+    expect(DEFAULT_PANEL_WINDOW).toBe("15m");
+    expect(panelWindow("1h").hours).toBe(1);
+    // An unknown choice is the default, not a throw: a stale message must still open.
+    expect(panelWindow("nonsense").id).toBe("15m");
+    expect(panelWindow(null).id).toBe("15m");
+    expect(panelWindow(undefined).id).toBe("15m");
+  });
+
+  it("clips each window to its own span", () => {
+    const readings = quarterHourly(96);
+    const span = (id: string): number => {
+      const points = windowReadings(readings, id, NOW).points;
+      const first = points[0]?.capturedAt.getTime() ?? 0;
+      const last = points.at(-1)?.capturedAt.getTime() ?? 0;
+      return Math.round((last - first) / 60_000);
+    };
+    // `all` keeps every reading; the timed windows keep only their own span, which is
+    // what stops a 15-minute view from drawing a day of history in two columns.
+    expect(windowReadings(readings, "all", NOW).points).toHaveLength(96);
+    expect(span("15m")).toBeLessThanOrEqual(15);
+    expect(span("1h")).toBeLessThanOrEqual(60);
+    expect(span("6h")).toBeLessThanOrEqual(360);
+    expect(span("24h")).toBeLessThanOrEqual(24 * 60);
+  });
+
+  it("averages the 1h window instead of plotting the raw polls", () => {
+    // A single poll that reported 80% while everything around it sat near 44: averaged,
+    // the chart must not show the spike at face value, and must still keep more than one
+    // column — one averaged number is not a trend.
+    const readings = quarterHourly(8, (index) => (index === 5 ? 80 : 44));
+    const points = windowReadings(readings, "1h", NOW).points;
+    expect(points.length).toBeGreaterThan(1);
+    const peak = Math.max(...points.map((point) => point.percent));
+    expect(peak).toBeLessThan(80);
+    expect(peak).toBeGreaterThan(44);
+  });
+
+  it("leaves the 15m window raw", () => {
+    // The quarter hour is the "what did the monitor just see" view: averaging it would
+    // hide the very reading a reader opened it for.
+    const readings = quarterHourly(2, () => 44);
+    expect(windowReadings(readings, "15m", NOW).points.map((point) => point.percent)).toEqual([
+      44, 44,
+    ]);
+  });
+
+  it("averages percentages as percentages, not as summed ratios", () => {
+    // Two readings inside one six-hour bucket, equal weight: the mean of 40 and 60 is 50.
+    // Summed, the same data would read 33.3 if the totals differed, which is the drift
+    // this pins. The `all` window has no clip, so only the bucketing rule is under test.
+    const readings = [
+      { capturedAt: new Date(NOW.getTime() - 60 * 60_000), percent: 40 },
+      { capturedAt: new Date(NOW.getTime() - 50 * 60_000), percent: 60 },
+    ];
+    expect(windowReadings(readings, "all", NOW).points.map((point) => point.percent)).toEqual([
+      40, 60,
+    ]);
+    const bucketed = averageReadings(readings, { hours: null, bucketHours: 6 }, NOW);
+    expect(bucketed).toHaveLength(1);
+    expect(bucketed[0]?.percent).toBe(50);
+  });
+
+  it("carries the window through a page custom ID", () => {
+    const id = pageCustomId("graph", "line", GRAPH_WIDTH, 2, "6h");
+    expect(parsePanelCustomId(id)?.window).toBe("6h");
+    // Paging must not drop the window, which is what made the tables reset.
+    expect(parsePanelCustomId(pageCustomId("graph", "line", GRAPH_WIDTH, 0))?.window).toBeUndefined();
+  });
+
+  it("names the chosen window in the chart caption", () => {
+    // Built from the file's own `snapshot` helper: a raw literal without `progress` reads
+    // as "nothing stored yet" and the chart never draws, which would make this pass or
+    // fail for a reason unrelated to the caption. The readings sit inside one hour, which
+    // is what the `1h` window is meant to cover.
+    const now = Date.now();
+    const history = Array.from({ length: 4 }, (_, index) => ({
+      ...snapshot(0, { done: 400 + index, total: 1_000, percent: 40 + index * 0.5 }),
+      capturedAt: new Date(now - (3 - index) * 12 * 60_000),
+    }));
+    const view = buildGithubView({
+      fullName: "anyps5/anyps5",
+      repoUrl: "https://github.com/anyps5/anyps5",
+      history,
+      latest: history.at(-1) ?? null,
+      panel: "graph",
+      style: "line",
+      width: GRAPH_WIDTH,
+      ownerId: null,
+      window: "1h",
+    });
+    const text = [
+      ...view.blocks.map((block) => block.description ?? ""),
+      ...view.blocks.flatMap((block) => block.sections).map((section) => section.text),
+    ].join("\n");
+    expect(text).toContain("window: **1 hour · averaged**");
+  });
+});
+
 describe("the graph fits a phone", () => {
   // A phone shows roughly 25 characters of a fenced block before it scrolls, and a
   // fenced block does not wrap: a row over the budget is a chart that runs off the
@@ -1324,6 +1459,10 @@ describe("the graph fits a phone", () => {
       style,
       width,
       ownerId: null,
+      // These fixtures span days, so the window that shows them all is the one that
+      // measures the drawing. A clipped default would draw one column and the width
+      // assertions would pass for the wrong reason.
+      window: "all" as const,
     });
     return view.blocks.flatMap((block) => block.sections).flatMap((s) => drawnRows(s.text));
   }
@@ -1462,6 +1601,45 @@ describe("!g — the same panels, typed", () => {
     expect(parseGithubMessage("!g history 999")).toEqual({ kind: "history", limit: 25 });
     expect(parseGithubMessage("!g history")).toEqual({ kind: "history", limit: 12 });
     expect(parseGithubMessage("!g history abc")).toEqual({ kind: "history", limit: 12 });
+  });
+
+  it("reads a window on a panel", () => {
+    // A window is read like the style: anywhere in the message, from the same table the
+    // slash command's choices come from.
+    expect(parseGithubMessage("!g graph 1h")).toEqual({
+      kind: "panel",
+      panel: "graph",
+      style: "line",
+      window: "1h",
+    });
+    expect(parseGithubMessage("!g 6h graph bars")).toEqual({
+      kind: "panel",
+      panel: "graph",
+      style: "bars",
+      window: "6h",
+    });
+    // The window may lead or trail, like the style: `!g 1h graph` must not read as a
+    // misspelt panel name and turn into help.
+    expect(parseGithubMessage("!g 1h graph")).toEqual({
+      kind: "panel",
+      panel: "graph",
+      style: "line",
+      window: "1h",
+    });
+    // An unset window stays absent rather than being filled in, so a caller that cares
+    // about the default can tell "not asked" from "asked for 15m".
+    expect(parseGithubMessage("!g graph")).toEqual({
+      kind: "panel",
+      panel: "graph",
+      style: "line",
+    });
+    // An unrecognised word is not a window, and must not turn a panel into help: it is
+    // ignored the way an unrecognised extra word always was.
+    expect(parseGithubMessage("!g graph 99h")).toEqual({
+      kind: "panel",
+      panel: "graph",
+      style: "line",
+    });
   });
 
   it("answers help instead of staying silent on a typo", () => {

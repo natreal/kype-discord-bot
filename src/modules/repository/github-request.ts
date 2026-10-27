@@ -20,6 +20,7 @@ import {
 import type { RepositoryMonitorService } from "./repository.service.js";
 import type { GitHubLiveFacts } from "../../services/github/live-feed.js";
 import { BAR_GUTTER, MAX_ROW } from "./repository-chart.js";
+import type { PanelWindowId } from "./repository-window.js";
 
 /**
  * Snapshots read per render.
@@ -72,6 +73,8 @@ export async function renderGithubPanel(input: {
    * it re-rendered page one on every click. Absent means the first page.
    */
   readonly page?: number;
+  /** Which time window the panel reads over. Omitted means the raw quarter hour. */
+  readonly window?: PanelWindowId;
   /**
    * Whether to ask the live feed, and where to put its answer.
    *
@@ -98,6 +101,7 @@ export async function renderGithubPanel(input: {
     width: input.width ?? GRAPH_WIDTH,
     ownerId: input.ownerId,
     ...(input.page === undefined ? {} : { page: input.page }),
+    ...(input.window === undefined ? {} : { window: input.window }),
     // Omitted rather than `null` when the feed is absent: the view treats a missing
     // value as "not asked" and a `null` as "GitHub did not answer", so the two cannot
     // be confused in the reply.
@@ -176,6 +180,7 @@ export async function renderGithubMessage(input: {
         panel: request.panel,
         style: request.style,
         ownerId: input.ownerId,
+        ...(request.window === undefined ? {} : { window: request.window }),
         // A typed panel shows the same live fields a clicked one does. Asking here
         // rather than in `messageCreate` keeps the fetch next to the render that needs
         // it, and the prefix never has to know which panels use it.

@@ -16,6 +16,11 @@
  */
 import type { SnapshotRecord } from "./repository.types.js";
 import {
+  panelWindow,
+  windowReadings,
+  type PanelWindowId,
+} from "./repository-window.js";
+import {
   analyzeLibraries,
   decompose,
   implementationPoints,
@@ -185,6 +190,13 @@ export interface GithubContext {
    */
   readonly page?: number;
   /**
+   * Which time window the panels read over.
+   *
+   * Absent means the raw quarter hour, which is what the panels showed before a window
+   * could be chosen, so an existing caller keeps its behaviour.
+   */
+  readonly window?: PanelWindowId;
+  /**
    * Fresh GitHub facts, or `null` when they could not be read.
    *
    * Three states, and all three are meaningful: absent means the caller did not ask
@@ -235,7 +247,7 @@ export function buildGithubView(context: GithubContext): GithubView {
       ...withLiveSection(block, index === 0 ? context.live : undefined),
       footer: footerFor(context),
     })),
-    components: componentRows(context.panel, context.style, context.width, true, { page, pages }),
+    components: componentRows(context.panel, context.style, context.width, true, { page, pages }, context.window),
   };
 }
 
@@ -948,7 +960,7 @@ export function chunk<T>(items: readonly T[], size: number): T[][] {
  * is bad news.
  */
 function timelinePanel(context: GithubContext): Omit<ViewBlock, "footer">[] {
-  const history = trimmedHistory(context, TIMELINE_ROWS);
+  const history = trimmedHistory({ ...context, history: windowedHistory(context) }, TIMELINE_ROWS);
   const summary = summarize(seriesFor(context, "libraries"));
 
   // Stored oldest first, drawn newest first: the step is still the change from the
@@ -1042,14 +1054,52 @@ function trimmedHistory(context: GithubContext, limit: number): readonly Snapsho
 }
 
 /**
+ * @returns the snapshots the panels read over, clipped and averaged to the chosen window.
+ *
+ * Every panel asks through here rather than touching `context.history`, so the window
+ * applies to all of them and a panel added later inherits it instead of quietly showing
+ * the raw store. `at` is the newest reading rather than the wall clock when there is one:
+ * a monitor that stopped an hour ago should still show its last window of data instead of
+ * an empty chart.
+ */
+function windowedHistory(context: GithubContext, now = new Date()): readonly SnapshotRecord[] {
+  const anchor = context.history.at(-1)?.capturedAt ?? now;
+  const { points } = windowReadings(
+    context.history.map((snapshot) => ({
+      snapshot,
+      capturedAt: snapshot.capturedAt,
+      percent: snapshot.state.libraryPercent ?? 0,
+    })),
+    context.window,
+    anchor,
+  );
+  return points.map((point) => point.snapshot);
+}
+
+/**
+ * @returns the label of the window the reader asked for, for the chart's caption.
+ *
+ * Named apart from `windowLabel`, which measures how long the *stored* history spans: one
+ * answers "which window did I pick", the other "how much data is behind this". They read
+ * differently in a caption and must not be confused.
+ */
+function chosenWindowLabel(context: GithubContext): string {
+  return panelWindow(context.window).label;
+}
+
+/**
  * The trend as a chart, in the requested style.
  *
  * The chart is fenced so Discord renders it monospaced; the legend beneath is
  * plain text, so its numbers stay readable where a code block would scroll.
  */
 function graphPanel(context: GithubContext): Omit<ViewBlock, "footer">[] {
-  const libraries = seriesFor(context, "libraries");
-  const shaders = seriesFor(context, "shaders");
+  // The window is applied once, here, and both series and every caption read the same
+  // history: a caption that says "the last 6 hours" while the chart plots the raw store
+  // is the kind of disagreement a reader has no way to spot.
+  const scoped: GithubContext = { ...context, history: windowedHistory(context) };
+  const libraries = seriesFor(scoped, "libraries");
+  const shaders = seriesFor(scoped, "shaders");
   // One column per reading, capped so the *widest* row a phone has to show still fits:
   // `bars` prepends a `100.00%┫` gutter to the columns, which is why the columns are
   // `MAX_ROW` minus the widest gutter that style can draw. Sizing from the bare columns
@@ -1084,6 +1134,7 @@ function graphPanel(context: GithubContext): Omit<ViewBlock, "footer">[] {
   const description = body(
     [
       `📈 **${libraryWindow.length}** readings · style \`${context.style}\` · ${context.style === "bars" ? "scale starts at 0%" : "scale spans the window"}`,
+      `🗓 window: **${chosenWindowLabel(context)}**`,
       summary === null
         ? "▬ no library reading in this window"
         : `📚 ${movement(summary.change)} — from **${formatValue(summary.first.value, 2)}%** to **${formatValue(summary.last.value, 2)}%**`,
@@ -1507,8 +1558,12 @@ export function pageCustomId(
   style: ChartStyle,
   width: number,
   page: number,
+  window?: PanelWindowId,
 ): string {
-  return `${GITHUB_PREFIX}:page:${panel}:${style}:${width}:${page}`;
+  // The window is last and omitted when unset, so the ID a build without windows writes
+  // stays byte-identical to the one this build parses as the default window.
+  const suffix = window === undefined ? "" : `:${window}`;
+  return `${GITHUB_PREFIX}:page:${panel}:${style}:${width}:${page}${suffix}`;
 }
 
 /**
@@ -1534,6 +1589,7 @@ function componentRows(
   width: number,
   withAll: boolean,
   paging?: PanelPaging,
+  window?: PanelWindowId,
 ): ComponentRows {
   const buttons: readonly ComponentButton[] = PANELS.map((panel) => ({
     customId: panelCustomId(panel.id, style, width),
@@ -1545,7 +1601,7 @@ function componentRows(
   // Only when there is somewhere to go: a `1/1` button is clutter, and its absence
   // is also what keeps the plain panel row the only row for a small project.
   if (paging !== undefined && paging.pages > 1) {
-    rows.push(pageButtons(current, style, width, paging));
+    rows.push(pageButtons(current, style, width, paging, window));
   }
   return {
     buttons: rows,
@@ -1575,6 +1631,7 @@ function pageButtons(
   style: ChartStyle,
   width: number,
   paging: PanelPaging,
+  window?: PanelWindowId,
 ): readonly ComponentButton[] {
   const { page, pages } = paging;
   return [
@@ -1582,7 +1639,7 @@ function pageButtons(
       // `width` is carried for the same reason the panel buttons carry it: paging a
       // table must not redraw the chart at some other column count, and pressing
       // `Next` on the libraries panel is still a click on this message.
-      customId: pageCustomId(panel, style, width, Math.max(0, page - 1)),
+      customId: pageCustomId(panel, style, width, Math.max(0, page - 1), window),
       label: "Previous",
       emoji: "◀️",
       style: "secondary",
@@ -1591,14 +1648,14 @@ function pageButtons(
       disabled: page <= 0,
     },
     {
-      customId: pageCustomId(panel, style, width, page),
+      customId: pageCustomId(panel, style, width, page, window),
       label: `Page ${page + 1}/${pages}`,
       emoji: "📄",
       style: "secondary",
       disabled: true,
     },
     {
-      customId: pageCustomId(panel, style, width, Math.min(pages - 1, page + 1)),
+      customId: pageCustomId(panel, style, width, Math.min(pages - 1, page + 1), window),
       label: "Next",
       emoji: "▶️",
       style: "secondary",
@@ -1614,6 +1671,8 @@ export interface PanelRequest {
   readonly width: number;
   /** The page asked for; `0` for a panel button, which always opens page one. */
   readonly page: number;
+  /** The window asked for; absent on an ID written before windows existed. */
+  readonly window?: PanelWindowId;
 }
 
 /**
@@ -1630,8 +1689,11 @@ export interface PanelRequest {
  */
 export function parsePanelCustomId(customId: string): PanelRequest | null {
   const parts = customId.split(":");
-  const [prefix, kind, panel, style, width, page] = parts;
-  const expected = kind === "page" ? 6 : 5;
+  const [prefix, kind, panel, style, width, page, window] = parts;
+  // The window is a trailing, optional segment: a button written before it existed names
+  // no window and means the default one, so a message from an older build keeps working
+  // instead of answering "this panel is out of date".
+  const expected = kind === "page" ? (window === undefined ? 6 : 7) : 5;
   if (parts.length !== expected || prefix !== GITHUB_PREFIX) {
     return null;
   }
@@ -1660,6 +1722,7 @@ export function parsePanelCustomId(customId: string): PanelRequest | null {
     style,
     width: Math.trunc(parsedWidth),
     page: parsedPage,
+    ...(window === undefined ? {} : { window: panelWindow(window).id }),
   };
 }
 

@@ -35,6 +35,15 @@ export {
   MIN_REFRESH_INTERVAL_MINUTES,
 } from "./repository.tasks.js";
 export { deriveEvents, formatCount, truncate } from "./repository.events.js";
+export {
+  DEFAULT_PANEL_WINDOW,
+  PANEL_WINDOWS,
+  averageReadings,
+  panelWindow,
+  smoothByMinutes,
+  windowReadings,
+  type PanelWindowId,
+} from "./repository-window.js";
 export { buildReportContent, type ReportContent } from "./repository-report.content.js";
 export { DiscordRepositoryReport, renderEmbed } from "./discord-repository-report.js";
 export { PrismaRepositoryMonitorRepository } from "./prisma-repository.repository.js";

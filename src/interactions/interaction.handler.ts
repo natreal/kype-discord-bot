@@ -535,6 +535,9 @@ export class InteractionHandler {
         // Carried from the pressed button, so the reader stays on page four instead
         // of being thrown back to page one by their own click.
         page: request.page,
+        // Carried like the page: a click that paged the table must not silently drop the
+        // reader back to the default window they had chosen away from.
+        ...(request.window === undefined ? {} : { window: request.window }),
         live: "fetch",
       });
       if (answer.kind !== "view") {

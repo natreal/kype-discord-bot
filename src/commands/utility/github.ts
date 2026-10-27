@@ -40,6 +40,7 @@ import {
   REPORT_RANGES,
   type ReportRangeId,
 } from "../../modules/repository/repository-report.analytics.js";
+import { PANEL_WINDOWS, panelWindow } from "../../modules/repository/repository-window.js";
 import {
   GRAPH_WIDTH,
   renderGithubHistoryRows,
@@ -84,6 +85,22 @@ function withStyle(sub: SlashCommandSubcommandBuilder): SlashCommandSubcommandBu
         { name: "bars · columns on a labelled scale", value: "bars" },
         { name: "line · columns scaled to the window", value: "line" },
       ),
+  );
+}
+
+/**
+ * @returns `sub` with a `window` choice: how far back the panel reads.
+ *
+ * On every panel subcommand rather than one global option, because it is the panels that
+ * read a series; `history` and `refresh` are not asking the same question and would
+ * either ignore it or silently change what they list.
+ */
+function withWindow(sub: SlashCommandSubcommandBuilder): SlashCommandSubcommandBuilder {
+  return sub.addStringOption((option) =>
+    option
+      .setName("window")
+      .setDescription("How far back to read, and how finely to average (default: 15m).")
+      .addChoices(...PANEL_WINDOWS.map((window) => ({ name: window.label, value: window.id }))),
   );
 }
 
@@ -133,38 +150,50 @@ export default defineSlashCommand({
     .addSubcommand((sub) =>
       withVisibility(
         withStyle(
-          sub
-            .setName("overview")
-            .setDescription("Both sections, the pace and the library breakdown."),
-        ),
-      ),
-    )
-    .addSubcommand((sub) =>
-      withVisibility(
-        withStyle(
-          sub.setName("libraries").setDescription("Every library, and how each one moved."),
-        ),
-      ),
-    )
-    .addSubcommand((sub) =>
-      withVisibility(
-        sub.setName("timeline").setDescription("The last recorded readings, newest first."),
-      ),
-    )
-    .addSubcommand((sub) =>
-      withVisibility(
-        withStyle(
-          sub.setName("graph").setDescription("The implementation trend drawn as a text chart."),
-        ),
-      ),
-    )
-    .addSubcommand((sub) =>
-      withVisibility(
-        sub
-          .setName("why")
-          .setDescription(
-            "Explain why the library share moved — work, or newly discovered functions.",
+          withWindow(
+            sub
+              .setName("overview")
+              .setDescription("Both sections, the pace and the library breakdown."),
           ),
+        ),
+      ),
+    )
+    .addSubcommand((sub) =>
+      withVisibility(
+        withStyle(
+          withWindow(
+            sub.setName("libraries").setDescription("Every library, and how each one moved."),
+          ),
+        ),
+      ),
+    )
+    .addSubcommand((sub) =>
+      withVisibility(
+        withWindow(
+          sub.setName("timeline").setDescription("The last recorded readings, newest first."),
+        ),
+      ),
+    )
+    .addSubcommand((sub) =>
+      withVisibility(
+        withStyle(
+          withWindow(
+            sub
+              .setName("graph")
+              .setDescription("The implementation trend drawn as a text chart."),
+          ),
+        ),
+      ),
+    )
+    .addSubcommand((sub) =>
+      withVisibility(
+        withWindow(
+          sub
+            .setName("why")
+            .setDescription(
+              "Explain why the library share moved — work, or newly discovered functions.",
+            ),
+        ),
       ),
     )
     .addSubcommand((sub) =>
@@ -271,6 +300,9 @@ async function handlePanel(
       // rather than the whole answer.
       ownerId: interaction.user?.id ?? null,
       width: GRAPH_WIDTH,
+      // The window is read from the same option on every panel subcommand, so a reader
+      // who picks "1 hour · averaged" gets it on whichever panel they then look at.
+      window: panelWindow(interaction.options.getString("window")).id,
       // Asked through the shared renderer so `/github` and `!g` show the same live
       // fields: the feed is cached for two minutes and has its own deadline, so this
       // costs a reply nothing when GitHub is slow.
