@@ -332,7 +332,26 @@ describe("MonitorFeed", () => {
   });
 
   describe("bounds", () => {
-    it("keeps the newest 240 samples and 200 log lines", async () => {
+    it("keeps a day of readings, and drops the ones the hourly charts cannot reach", async () => {
+      const { feed, clock } = feedOver(server());
+
+      clock.now = at(0);
+      await feed.poll();
+      clock.now = at(23 * 3_600);
+      await feed.poll();
+      // Lower than the newest reading minus the day the charts look back over: there is
+      // no column left to draw it in, and keeping it would only cost memory.
+      clock.now = at(24 * 3_600 + 900);
+      await feed.poll();
+
+      const samples = feed.state().samples;
+
+      expect(samples.map((sample) => sample.at)).toEqual([at(23 * 3_600), at(24 * 3_600 + 900)]);
+      // The newest reading is never dropped, whatever the cutoff would say.
+      expect(samples.at(-1)?.at).toEqual(feed.state().progress?.at);
+    });
+
+    it("keeps every reading of a fast run inside the day, and 200 log lines", async () => {
       const live = liveSource();
       live.answer = facts();
       const { feed, clock } = feedOver(server(), { live: live.source });
@@ -344,8 +363,10 @@ describe("MonitorFeed", () => {
 
       const state = feed.state();
 
-      expect(state.samples).toHaveLength(240);
-      expect(state.samples.at(0)?.at).toEqual(at(5 * 15));
+      // Retention is a day, not a count: 245 polls is less than an hour, so all of them
+      // are still history the charts can use. The log is the thing that is capped.
+      expect(state.samples).toHaveLength(245);
+      expect(state.samples.at(0)?.at).toEqual(at(0));
       expect(state.samples.at(-1)?.at).toEqual(at(244 * 15));
       expect(state.events).toHaveLength(200);
     });

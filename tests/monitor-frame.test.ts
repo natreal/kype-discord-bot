@@ -189,6 +189,30 @@ function failedState(): MonitorState {
   };
 }
 
+/**
+ * @returns the state of a window open across three hours, where the middle hour did the
+ * work: the shape the hourly charts exist to show.
+ */
+function spreadState(): MonitorState {
+  const hour = 3_600_000;
+  const at = (offsetMs: number): Date => new Date(NOW.getTime() + offsetMs);
+  return {
+    ...fullState(),
+    startedAt: at(-2 * hour),
+    progress: sampleOf(snapshot(6_150, 1_050), NOW),
+    samples: [
+      // 10:00 and 10:10: four libraries, so the first hour is a short bar.
+      sampleOf(snapshot(6_000, 1_000), at(-2 * hour)),
+      sampleOf(snapshot(6_004, 1_000), at(-2 * hour + 10 * 60_000)),
+      // 11:00 and 11:50: forty libraries and ten shaders, the busiest hour.
+      sampleOf(snapshot(6_100, 1_030), at(-hour)),
+      sampleOf(snapshot(6_140, 1_040), at(-10 * 60_000)),
+      // 12:00: one poll so far, so nothing has finished in the hour yet.
+      sampleOf(snapshot(6_150, 1_050), NOW),
+    ],
+  };
+}
+
 /** @returns `state` rendered at `size`, plain unless `color`. */
 function render(state: MonitorState, size: FrameSize, color = false): readonly string[] {
   return renderFrame(buildModel(state, NOW), size, { color });
@@ -268,6 +292,70 @@ describe("renderFrame", () => {
       expect(frame).toContain("LIBRARIES");
       // The second section is what goes: half a section is better than half a fact.
       expect(frame).not.toContain("SHADERS");
+    });
+  });
+
+  describe("the hourly charts", () => {
+    it("puts readings taken in different hours in different columns, and says where the row starts", () => {
+      const frame = render(fullState(), SIZES[0]!).join("\n");
+
+      // 11:45 and 12:00 are two hours, so two columns, and the heading carries the span
+      // because a separate axis row is the first thing the allocator drops.
+      expect(frame).toContain(
+        "HOURLY COVERAGE  11:00 → now · 1 column = 1h · 2 hours held · mean of 1 poll so far",
+      );
+      expect(frame).toContain("libraries ▁█  49.01 → 49.65 %");
+    });
+
+    it("counts the work inside an hour, and names the busiest one", () => {
+      const frame = render(spreadState(), SIZES[0]!).join("\n");
+
+      expect(frame).toContain(
+        "HOURLY WORK  10:00 → now · 1 column = 1h · peak 11:00 · 40 libraries",
+      );
+    });
+
+    it("draws no bar at all for an hour in which nothing was finished", () => {
+      const frame = render(spreadState(), SIZES[0]!).join("\n");
+
+      // The blank column between the bars is 12:00, which has one poll and no work: a
+      // lowest-partial `▁` there would read as "a little" rather than as nothing.
+      expect(frame).toContain("libraries ▁█   0 so far this hour");
+    });
+
+    it("says so instead of drawing empty columns when no hour finished anything", () => {
+      const frame = render(fullState(), SIZES[0]!).join("\n");
+
+      expect(frame).toContain("nothing finished in the hours held");
+      expect(frame).not.toContain("so far this hour");
+    });
+
+    it("says the chart opens with the first reading rather than drawing an empty axis", () => {
+      const frame = render(emptyState(), SIZES[0]!).join("\n");
+
+      expect(frame).toContain(
+        "HOURLY COVERAGE  1 column = 1h · the chart opens with the first reading",
+      );
+    });
+
+    it("drops the charts before it drops the gauges", () => {
+      expect(render(fullState(), { columns: 80, rows: 24 }).join("\n")).toContain(
+        "HOURLY COVERAGE",
+      );
+      expect(render(fullState(), { columns: 60, rows: 16 }).join("\n")).not.toContain("HOURLY");
+    });
+  });
+
+  describe("the now panel", () => {
+    it("says what the last poll did, and what the hour in progress has done", () => {
+      const frame = render(fullState(), SIZES[0]!).join("\n");
+
+      expect(frame).toContain("NOW  last poll 15m 00s ago · +78 libraries · +116 shaders");
+      expect(frame).toContain("this hour from 12:00:00 UTC, 1 poll · no libraries · no shaders");
+    });
+
+    it("says which commit the reading came from, shortened to what a reader can copy", () => {
+      expect(render(fullState(), SIZES[0]!).join("\n")).toContain("progress.json from 9f3c1aa");
     });
   });
 

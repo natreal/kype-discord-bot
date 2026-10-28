@@ -10,6 +10,8 @@ import { describe, expect, it } from "vitest";
 
 import {
   buildModel,
+  hourlyBuckets,
+  hourOf,
   lastStepOf,
   lowestGroups,
   movesSince,
@@ -46,8 +48,7 @@ function snapshot(
   groups: readonly GroupFixture[],
   shaders: { readonly done: number; readonly total: number } = { done: 0, total: 0 },
 ): AnyPs5Progress {
-  const percent = (part: number, whole: number): number =>
-    whole === 0 ? 0 : (100 * part) / whole;
+  const percent = (part: number, whole: number): number => (whole === 0 ? 0 : (100 * part) / whole);
   return parseProgressSnapshot({
     libraries: {
       done: libraries.done,
@@ -183,6 +184,82 @@ describe("lastStepOf", () => {
   });
 });
 
+describe("hourOf", () => {
+  it("rounds a reading down to the hour it was taken in, on the UTC clock", () => {
+    expect(hourOf(new Date("2026-10-25T12:59:59.999Z"))).toEqual(
+      new Date("2026-10-25T12:00:00.000Z"),
+    );
+    expect(hourOf(new Date("2026-10-25T12:00:00.000Z"))).toEqual(
+      new Date("2026-10-25T12:00:00.000Z"),
+    );
+    // Half past eleven at night belongs to the hour that started that evening, not to
+    // the next day: a column labelled 23:00 has to mean 23:00 to whoever reads it.
+    expect(hourOf(new Date("2026-10-25T23:30:00.000Z"))).toEqual(
+      new Date("2026-10-25T23:00:00.000Z"),
+    );
+  });
+});
+
+describe("hourlyBuckets", () => {
+  it("gives each observed hour one bucket, oldest first, and none to an hour nobody saw", () => {
+    const buckets = hourlyBuckets(
+      [
+        reading(at(0), { done: 1, total: 100 }),
+        // 13:00 has no reading: the window was closed, and the chart must say so by
+        // leaving a gap rather than by drawing a zero.
+        reading(at(120), { done: 2, total: 100 }),
+        reading(at(240), { done: 3, total: 100 }),
+      ],
+      at(240),
+    );
+
+    expect(buckets.map((bucket) => bucket.startsAt.getUTCHours())).toEqual([12, 14, 16]);
+  });
+
+  it("averages the hour's percentages instead of recomputing them from the counters", () => {
+    const buckets = hourlyBuckets(
+      [reading(at(0), { done: 10, total: 100 }), reading(at(30), { done: 30, total: 200 })],
+      at(30),
+    );
+
+    expect(buckets).toHaveLength(1);
+    // The mean of what was read — 10 % and 15 % — not 40/300 = 13.33 %: totals grow as
+    // functions are discovered, and that growth is not work done.
+    expect(buckets[0]?.libraries).toBe(12.5);
+    expect(buckets[0]?.polls).toBe(2);
+  });
+
+  it("counts the work inside an hour as its last counters minus its first", () => {
+    const [bucket] = hourlyBuckets(
+      [
+        reading(at(0), { done: 10, total: 100 }, [], { done: 5, total: 50 }),
+        reading(at(45), { done: 40, total: 120 }, [], { done: 9, total: 50 }),
+      ],
+      at(45),
+    );
+
+    expect(bucket?.librariesAdded).toBe(30);
+    expect(bucket?.shadersAdded).toBe(4);
+    expect(bucket?.librariesDone).toBe(40);
+    expect(bucket?.shadersDone).toBe(9);
+  });
+
+  it("keeps only the hours inside the window it is asked for", () => {
+    const samples = [
+      reading(at(0), { done: 1, total: 100 }),
+      reading(at(60), { done: 2, total: 100 }),
+    ];
+
+    const held = hourlyBuckets(samples, at(90), 1);
+
+    expect(held.map((bucket) => bucket.startsAt.getUTCHours())).toEqual([13]);
+  });
+
+  it("is empty before the first reading", () => {
+    expect(hourlyBuckets([], at(0))).toEqual([]);
+  });
+});
+
 describe("lowestGroups", () => {
   const groups: readonly GroupFixture[] = [
     { name: "libSceAgc", done: 1, todo: 9 },
@@ -200,11 +277,7 @@ describe("lowestGroups", () => {
 
     // 0% before 10%, and between the two untouched libraries the larger one first:
     // that is the library where the next weeks of work are.
-    expect(listed.map((group) => group.name)).toEqual([
-      "libSceVid",
-      "libSceAudio",
-      "libSceAgc",
-    ]);
+    expect(listed.map((group) => group.name)).toEqual(["libSceVid", "libSceAudio", "libSceAgc"]);
   });
 
   it("honours the limit", () => {
@@ -258,6 +331,18 @@ describe("buildModel", () => {
     expect(model.groups[0]?.name).toBe("libSceAgc");
     expect(model.movers[0]?.change).toBe(10);
     expect(model.progress).toBe(samples[1]);
+    // Both readings were taken in the same hour, so they are one column, and that
+    // column is the hour the window is standing in.
+    expect(model.hourly).toHaveLength(1);
+    expect(model.thisHour).toBe(model.hourly[0]);
+    expect(model.thisHour?.polls).toBe(2);
+  });
+
+  it("has no hour in progress when the hour being stood in was never read", () => {
+    const model = buildModel(state([reading(at(0), { done: 1, total: 100 })]), at(65));
+
+    expect(model.hourly).toHaveLength(1);
+    expect(model.thisHour).toBeNull();
   });
 
   it("never reports a negative uptime, so a clock correction cannot underflow the header", () => {
@@ -276,4 +361,3 @@ describe("buildModel", () => {
     expect(model.groups).toHaveLength(12);
   });
 });
-

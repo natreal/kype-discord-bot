@@ -36,8 +36,22 @@ import {
 /** The window's cadence by default: often enough that the bars visibly move. */
 export const DEFAULT_INTERVAL_MS = 15_000;
 
-/** Samples kept: at the default cadence, an hour of history behind the trend. */
-const SAMPLE_LIMIT = 240;
+/**
+ * How much history the window keeps: a day of polls.
+ *
+ * The cadence is still fifteen seconds, but a chart that showed those readings raw would
+ * only ever be able to answer "the last few minutes". Keeping the day is what lets
+ * {@link hourlyBuckets} draw a column per hour, and a day at this cadence is 5,760 small
+ * immutable objects — cheaper than the terminal it is drawn on.
+ */
+const HISTORY_MS = 24 * 60 * 60_000;
+/**
+ * A ceiling on held readings, because the day is expressed in time and `--interval`
+ * decides how many readings fit in it. At the default cadence the ceiling is never
+ * reached; a one-second interval hits it after an hour and a half, and the window still
+ * has hours to draw.
+ */
+const SAMPLE_LIMIT = 10_000;
 /** Log lines kept: enough to explain the last few minutes, not a log file. */
 const EVENT_LIMIT = 200;
 /** The published snapshot is a small JSON document; anything huge is not it. */
@@ -214,7 +228,11 @@ export class MonitorFeed {
     }
 
     if (!response.ok) {
-      return { progress: null, reason: `progress.json answered HTTP ${response.status}`, commit: null };
+      return {
+        progress: null,
+        reason: `progress.json answered HTTP ${response.status}`,
+        commit: null,
+      };
     }
 
     const text = await response.text().catch(() => "");
@@ -353,7 +371,10 @@ export class MonitorFeed {
     const conclusion = facts.workflow?.conclusion ?? null;
     if (conclusion !== null && conclusion !== (before.workflow?.conclusion ?? null)) {
       const name = facts.workflow?.name ?? "CI";
-      this.record(conclusion === "success" ? "good" : conclusion === "failure" ? "bad" : "info", `${name} ${conclusion}`);
+      this.record(
+        conclusion === "success" ? "good" : conclusion === "failure" ? "bad" : "info",
+        `${name} ${conclusion}`,
+      );
     }
     if (facts.archived && !before.archived) {
       this.record("bad", "the repository is archived");
@@ -380,12 +401,19 @@ export class MonitorFeed {
     }
   }
 
-  /** Keeps `sample` as the newest of at most {@link SAMPLE_LIMIT} readings. */
+  /**
+   * Keeps `sample`, dropping the readings older than {@link HISTORY_MS}.
+   *
+   * Time rather than a count, because the charts are drawn in hours: a count of 240 was
+   * exactly one hour at the default cadence and half of one at `--interval 30`, which
+   * would have made the same window show a different amount of history depending on how
+   * it was started. The newest reading is always kept, whatever the cutoff says.
+   */
   private push(sample: MonitorSample): void {
     this.samples.push(sample);
-    if (this.samples.length > SAMPLE_LIMIT) {
-      this.samples = this.samples.slice(this.samples.length - SAMPLE_LIMIT);
-    }
+    const cutoff = sample.at.getTime() - HISTORY_MS;
+    const fresh = this.samples.filter((held) => held.at.getTime() >= cutoff);
+    this.samples = fresh.length > SAMPLE_LIMIT ? fresh.slice(fresh.length - SAMPLE_LIMIT) : fresh;
   }
 }
 

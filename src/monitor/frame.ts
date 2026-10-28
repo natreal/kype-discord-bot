@@ -19,6 +19,7 @@ import { formatValue, renderSparkline } from "../modules/repository/repository-c
 import type { GitHubLiveFacts } from "../services/github/live-feed.js";
 import type {
   GroupReading,
+  HourBucket,
   MonitorEvent,
   MonitorLevel,
   MonitorModel,
@@ -40,6 +41,10 @@ import {
 const MIN_COLUMNS = 20;
 /** Header and footer alone need five rows, so a frame is never drawn shorter. */
 const MIN_ROWS = 6;
+/** Columns a sparkline keeps for itself, however much its note wants: four is not a chart. */
+const MIN_CHART = 12;
+/** Characters of a commit hash worth showing: enough to find it, short enough to read. */
+const SHORT_SHA = 7;
 
 /** The window the frame is drawn into, in cells. */
 export interface FrameSize {
@@ -75,8 +80,15 @@ export function renderFrame(
   const sections = panelSections(model, layout);
   const budget = Math.max(0, rows - header.length - footer.length);
   const body = allocate(sections, budget);
+  // Panels hand back fewer lines than they were given when they have nothing to say (an
+  // empty log, a chart with no reading yet). Those rows are padded inside the body, not
+  // after the footer: the keys stay on the last row of the window, where the hand looks.
+  const filled = [...body];
+  while (filled.length < budget) {
+    filled.push("");
+  }
 
-  const lines = [...header, ...body, ...footer].slice(0, rows);
+  const lines = [...header, ...filled.slice(0, budget), ...footer].slice(0, rows);
   while (lines.length < rows) {
     lines.push("");
   }
@@ -111,12 +123,16 @@ interface Panel {
  *
  * Priorities are about what is worth keeping when the window shrinks: the two
  * progress bars are the reason the window exists, the live GitHub read is the part
- * that changes second to second, and the log explains a poll that failed.
+ * that changes second to second, and the log explains a poll that failed. The hourly
+ * charts sit in the middle — they are what makes a full screen worth having, and what
+ * a twelve-row window can do without, because the gauges already say where the project
+ * is and "NOW" says which way it is going.
  */
 function panelSections(model: MonitorModel, layout: Layout): readonly Panel[] {
   const progressMax = model.progressFailure === null ? 3 : 4;
   const liveMax = model.live === undefined ? 2 : model.live === null ? 3 : 5;
-  const trendMax = model.samples.length < 2 ? 2 : 3;
+  const nowMax = model.progress === null ? 3 : 4;
+  const hourlyMax = model.hourly.length === 0 ? 2 : 4;
   const groupMax = model.groups.length === 0 ? 2 : 2 + model.groups.length;
   const logMax = Math.max(2, Math.min(40, 2 + model.events.length));
 
@@ -154,10 +170,22 @@ function panelSections(model: MonitorModel, layout: Layout): readonly Panel[] {
       draw: (limit) => liveLines(model, layout, limit),
     },
     {
-      priority: 60,
-      min: Math.min(3, trendMax),
-      max: trendMax,
-      draw: () => trendLines(model, layout),
+      priority: 97,
+      min: Math.min(3, nowMax),
+      max: nowMax,
+      draw: (limit) => nowLines(model, layout, limit),
+    },
+    {
+      priority: 78,
+      min: Math.min(3, hourlyMax),
+      max: hourlyMax,
+      draw: (limit) => hourlyCoverageLines(model, layout, limit),
+    },
+    {
+      priority: 74,
+      min: Math.min(3, hourlyMax),
+      max: hourlyMax,
+      draw: (limit) => hourlyWorkLines(model, layout, limit),
     },
     {
       priority: 40,
@@ -206,7 +234,9 @@ function footerLines(model: MonitorModel, layout: Layout): readonly string[] {
     ? paint("paused ", "warn")
     : `${paint(width >= 60 ? "next poll in " : "next ", "dim")}${countdown(model.nextPollAt.getTime() - model.now.getTime())}`;
   const failures =
-    model.failureCount === 0 ? "" : ` ${paint("·", "faint")} ${paint(`${model.failureCount} failed`, "warn")}`;
+    model.failureCount === 0
+      ? ""
+      : ` ${paint("·", "faint")} ${paint(`${model.failureCount} failed`, "warn")}`;
   return [rule(width, paint), spread(keyLegend(width, paint), `${wait}${failures} `, width, paint)];
 }
 
@@ -268,32 +298,288 @@ function progressLines(
   ];
 }
 
-/** @returns the sparkline of library coverage, its range, and the window it covers. */
-function trendLines(model: MonitorModel, layout: Layout): readonly string[] {
+/**
+ * @returns what moved since the last poll, what has moved this hour, and the commit the
+ * snapshot came from.
+ *
+ * This is the panel that earns the window's refresh rate: the gauges above move slowly
+ * enough that a quarter-hour would look the same, but at fifteen seconds the two counts
+ * on the first line are the difference between "the port is running" and "the port is
+ * stuck", and they change while you read them.
+ */
+function nowLines(model: MonitorModel, layout: Layout, limit: number): readonly string[] {
   const { paint, width } = layout;
-  if (model.samples.length < 2) {
-    return [
-      "",
-      `  ${paint("TREND", "heading")}  ${paint("the chart appears after the second reading", "dim")}`,
-    ];
-  }
+  const dot = paint(" · ", "faint");
+  const heading = `  ${paint("NOW", "heading")}`;
+  const step = model.lastStep;
+  const hour = model.thisHour;
 
-  const values = model.samples.map((sample) => sample.libraries.percent);
-  const room = Math.max(8, Math.min(width - 24, values.length));
-  const shown = values.slice(-room);
-  const first = shown[0] ?? 0;
-  const last = shown.at(-1) ?? 0;
-  const spark = renderSparkline(shown, { zeroBased: false });
-  const span = `${formatValue(first, 2)} → ${formatValue(last, 2)} % · ${shown.length} readings`;
-  const low = formatValue(Math.min(...shown), 2);
-  const high = formatValue(Math.max(...shown), 2);
-  const window = `${uptime(model.uptimeMs)} of polls`;
+  const sincePoll =
+    step === null
+      ? [paint("no second poll yet", "dim")]
+      : [
+          paint(`last poll ${uptime(step.seconds * 1_000)} ago`, "faint"),
+          movedCount(step.librariesDone, "library", "libraries", paint),
+          movedCount(step.shadersDone, "shader", "shaders", paint),
+        ];
+  const sinceHour =
+    hour === null
+      ? [paint("this hour: nothing read yet", "dim")]
+      : [
+          paint(
+            `this hour from ${clock(hour.startsAt)} UTC, ${formatCount(hour.polls)} ${hour.polls === 1 ? "poll" : "polls"}`,
+            "faint",
+          ),
+          movedCount(hour.librariesAdded, "library", "libraries", paint),
+          movedCount(hour.shadersAdded, "shader", "shaders", paint),
+        ];
+  const commit = model.progressCommit;
+  const source =
+    commit === null
+      ? paint("progress.json: no commit reported", "faint")
+      : `${paint("progress.json from", "faint")} ${paint(commit.slice(0, SHORT_SHA), "accent")}`;
 
   return [
     "",
-    `  ${paint("TREND", "heading")}  ${paint(spark, "good")}  ${paint(span, "dim")}`,
-    `  ${paint(`low ${low} % · high ${high} % · over ${window}`, "faint")}`,
-  ];
+    `${heading}  ${trim(dot, sincePoll, width - visibleWidth(heading) - 3).join(dot)}`,
+    `  ${trim(dot, sinceHour, width - 2).join(dot)}`,
+    `  ${source}`,
+  ].slice(0, Math.max(2, limit));
+}
+
+/**
+ * @returns coverage per hour: the mean percentage each section stood at, hour by hour.
+ *
+ * One column per hour is the unit this window is read in. Fifteen-second readings drawn
+ * raw are a wall of noise that answers "what happened in the last minute"; an hour is
+ * where a port's progress is legible, and averaging means a single noisy poll cannot put
+ * a spike on an otherwise flat line.
+ */
+function hourlyCoverageLines(
+  model: MonitorModel,
+  layout: Layout,
+  limit: number,
+): readonly string[] {
+  const buckets = model.hourly;
+  const first = buckets[0];
+
+  if (first === undefined) {
+    return [
+      "",
+      chartHeading(
+        "HOURLY COVERAGE",
+        ["1 column = 1h", "the chart opens with the first reading"],
+        layout,
+      ),
+    ].slice(0, Math.max(1, limit));
+  }
+
+  const last = buckets.at(-1) ?? first;
+  const lastPolls = `${formatCount(last.polls)} ${last.polls === 1 ? "poll" : "polls"}`;
+
+  return [
+    "",
+    chartHeading(
+      "HOURLY COVERAGE",
+      [
+        chartSpan(buckets),
+        "1 column = 1h",
+        `${formatCount(buckets.length)} ${buckets.length === 1 ? "hour" : "hours"} held`,
+        `mean of ${lastPolls} so far`,
+      ],
+      layout,
+    ),
+    chartRow(
+      "libraries",
+      buckets,
+      (bucket) => bucket.libraries,
+      `${formatValue(first.libraries, 2)} → ${formatValue(last.libraries, 2)} %`,
+      "good",
+      layout,
+    ),
+    chartRow(
+      "shaders",
+      buckets,
+      (bucket) => bucket.shaders,
+      `${formatValue(first.shaders, 2)} → ${formatValue(last.shaders, 2)} %`,
+      "accent",
+      layout,
+    ),
+  ].slice(0, Math.max(2, limit));
+}
+
+/**
+ * @returns what each hour finished: one bar per hour, one row per section.
+ *
+ * Coverage answers "where is the port"; this answers "is the port moving", which is the
+ * question a monitor left open overnight is asking. A bar is the counters' last reading
+ * in the hour minus their first, so it is work observed rather than work inferred, and
+ * the hour still filling is drawn as what it has done so far rather than as a short hour.
+ */
+function hourlyWorkLines(model: MonitorModel, layout: Layout, limit: number): readonly string[] {
+  const buckets = model.hourly;
+  const first = buckets[0];
+
+  if (first === undefined) {
+    return [
+      "",
+      chartHeading(
+        "HOURLY WORK",
+        ["1 column = 1h", "the chart opens with the first reading"],
+        layout,
+      ),
+    ].slice(0, Math.max(1, limit));
+  }
+
+  const busiest = busiestHour(buckets);
+  const summary =
+    busiest === null
+      ? "nothing finished in the hours held"
+      : `peak ${hourLabel(busiest.startsAt)} · ${formatCount(busiest.librariesAdded)} libraries`;
+  const heading = chartHeading(
+    "HOURLY WORK",
+    [chartSpan(buckets), "1 column = 1h", summary],
+    layout,
+  );
+  if (busiest === null) {
+    // Every column would be blank: a heading that says so is the whole panel, and the
+    // rows it does not use go to the log.
+    return ["", heading].slice(0, Math.max(1, limit));
+  }
+
+  const hour = model.thisHour;
+  const soFar = (pick: (bucket: HourBucket) => number): string =>
+    hour === null ? "" : `${formatCount(pick(hour))} so far this hour`;
+
+  return [
+    "",
+    heading,
+    chartRow(
+      "libraries",
+      buckets,
+      (bucket) => bucket.librariesAdded,
+      soFar((bucket) => bucket.librariesAdded),
+      "good",
+      layout,
+      true,
+    ),
+    chartRow(
+      "shaders",
+      buckets,
+      (bucket) => bucket.shadersAdded,
+      soFar((bucket) => bucket.shadersAdded),
+      "accent",
+      layout,
+      true,
+    ),
+  ].slice(0, Math.max(2, limit));
+}
+
+/**
+ * @returns one chart row: the section it is about, the sparkline, and its newest number.
+ *
+ * The note is a fact and is therefore kept whole or dropped whole — a row that reads
+ * "48.93 →" is worse than one that shows only the shape. The chart gives up columns to
+ * the note rather than the other way round, down to {@link MIN_CHART}, below which the
+ * note goes instead: a chart four columns wide is not a chart.
+ *
+ * `zeroBased` is the difference between the two panels: coverage is drawn against its own
+ * range, so a quiet day still shows its shape, while work is drawn from zero, because a
+ * bar chart that floats turns thirty libraries an hour into a full-height bar and an hour
+ * that did nothing into a bottom one at the same height.
+ */
+function chartRow(
+  label: string,
+  buckets: readonly HourBucket[],
+  pick: (bucket: HourBucket) => number,
+  note: string,
+  role: PaintRole,
+  layout: Layout,
+  zeroBased = false,
+): string {
+  const { paint, width } = layout;
+  const name = 12;
+  const kept = width - (name + 2 + note.length) >= MIN_CHART + 2 ? note : "";
+  const room = Math.max(MIN_CHART, width - name - (kept === "" ? 0 : 2 + kept.length));
+  const values = buckets.slice(-room).map(pick);
+  // An hour that did nothing gets a blank column rather than the sparkline's lowest
+  // partial: on a zero-based bar chart `▁` and `█` are "some" and "a lot", and drawing
+  // nothing at all is the only honest way to draw zero. The sparkline returns one cell
+  // per value, so the columns line up with `values` index for index.
+  const spark = [...renderSparkline(values, { zeroBased })].map((cell, index) =>
+    zeroBased && values[index] === 0 ? " " : cell,
+  );
+  const tail = kept === "" ? "" : `  ${paint(kept, "dim")}`;
+  return `  ${paint(column(label, name - 2), "faint")}${paint(spark.join(""), role)}${tail}`;
+}
+
+/**
+ * @returns a chart's heading: what the panel is, then as many of its facts as fit.
+ *
+ * The span sits in the heading rather than in an axis row under the chart, because the
+ * row budget is spent on charts first: a separate axis line was the first thing the
+ * allocator dropped, which left the columns unlabelled exactly when the window was small.
+ * Facts still go whole, so a narrow window shows fewer of them rather than half of one.
+ */
+function chartHeading(label: string, facts: readonly string[], layout: Layout): string {
+  const { paint, width } = layout;
+  const dot = paint(" · ", "faint");
+  const head = `  ${paint(label, "heading")}  `;
+  const room = Math.max(0, width - visibleWidth(head) - 1);
+  const kept = trim(
+    dot,
+    facts.map((fact) => paint(fact, "faint")),
+    room,
+  );
+  return `${head}${kept.join(dot)}`;
+}
+
+/** @returns the hours a chart spans, from its oldest column to the one being filled. */
+function chartSpan(buckets: readonly HourBucket[]): string {
+  const first = buckets[0];
+  return first === undefined ? "now" : `${hourLabel(first.startsAt)} → now`;
+}
+
+/** @returns `at` as the whole hour it falls in, in UTC: `13:00`. */
+function hourLabel(at: Date): string {
+  return `${String(at.getUTCHours()).padStart(2, "0")}:00`;
+}
+
+/** @returns the hour that finished the most libraries, or `null` when none did. */
+function busiestHour(buckets: readonly HourBucket[]): HourBucket | null {
+  let best: HourBucket | null = null;
+  for (const bucket of buckets) {
+    if (
+      bucket.librariesAdded > 0 &&
+      (best === null || bucket.librariesAdded > best.librariesAdded)
+    ) {
+      best = bucket;
+    }
+  }
+  return best;
+}
+
+/**
+ * @returns `pieces` with the last ones dropped until they fit `room`.
+ *
+ * Facts go whole. A line cut by {@link fit} can end on a separator, and "· +208" with no
+ * unit after it is worse than a shorter line that still says something true.
+ */
+function trim(separator: string, pieces: readonly string[], room: number): readonly string[] {
+  const kept = [...pieces];
+  while (kept.length > 1 && visibleWidth(kept.join(separator)) > room) {
+    kept.pop();
+  }
+  return kept;
+}
+
+/** @returns a signed count of finished items, or "no libraries" when nothing moved. */
+function movedCount(count: number, one: string, many: string, paint: Painter): string {
+  if (count === 0) {
+    return paint(`no ${many}`, "dim");
+  }
+  const noun = Math.abs(count) === 1 ? one : many;
+  return paint(`${signed(count)} ${noun}`, count > 0 ? "good" : "bad");
 }
 
 /**
@@ -355,7 +641,10 @@ function allocate(panels: readonly Panel[], budget: number): string[] {
 function groupLines(model: MonitorModel, layout: Layout, limit: number): readonly string[] {
   const { paint } = layout;
   if (model.groups.length === 0) {
-    return ["", `  ${paint("GROUPS", "heading")}  ${paint("no per-library table in this snapshot", "faint")}`];
+    return [
+      "",
+      `  ${paint("GROUPS", "heading")}  ${paint("no per-library table in this snapshot", "faint")}`,
+    ];
   }
   const rows = Math.max(0, limit - 2);
   const moved = new Map(model.movers.map((mover) => [mover.name, mover.change]));
