@@ -213,6 +213,31 @@ function spreadState(): MonitorState {
   };
 }
 
+/** @returns `count` groups, each further along than the last, so index order is rank order. */
+function crowd(count: number, gained = 0): ReturnType<typeof group>[] {
+  return Array.from({ length: count }, (_, index) =>
+    group(`G${String(index).padStart(2, "0")}`, index + (index === 1 ? gained : 0), 60),
+  );
+}
+
+/** @returns a snapshot with `groups` under a section total nothing depends on. */
+function listed(groups: readonly ReturnType<typeof group>[]) {
+  return parseProgressSnapshot({
+    libraries: { done: 100, total: 12_309, percent: 0.81, groups },
+    shaders: { done: 0, total: 1_166, percent: 0, groups: [] },
+  });
+}
+
+/**
+ * @returns the state of a window reading a snapshot of sixty groups, one of which has
+ * gained since the first reading — what the table has to fit, and to mark.
+ */
+function crowdedState(gained = 4): MonitorState {
+  const before = sampleOf(listed(crowd(60)), new Date(NOW.getTime() - FIFTEEN_MINUTES));
+  const after = sampleOf(listed(crowd(60, gained)), NOW);
+  return { ...fullState(), progress: after, samples: [before, after] };
+}
+
 /** @returns `state` rendered at `size`, plain unless `color`. */
 function render(state: MonitorState, size: FrameSize, color = false): readonly string[] {
   return renderFrame(buildModel(state, NOW), size, { color });
@@ -292,6 +317,56 @@ describe("renderFrame", () => {
       expect(frame).toContain("LIBRARIES");
       // The second section is what goes: half a section is better than half a fact.
       expect(frame).not.toContain("SHADERS");
+    });
+  });
+
+  describe("the group table", () => {
+    /** @returns the frame's group rows: the per-library table, and nothing else. */
+    const table = (state: MonitorState, size: FrameSize): readonly string[] =>
+      render(state, size).filter((line) => /G\d\d /.test(line));
+
+    it("lays the groups out across the window instead of down one column", () => {
+      const rows = table(crowdedState(), { columns: 120, rows: 40 });
+
+      // Three cells to a row at 120 columns, which is what turns ten rows of table into
+      // thirty groups: progress.json publishes hundreds, and one per row showed six.
+      expect(rows.length).toBeGreaterThan(4);
+      for (const line of rows) {
+        expect(line.match(/G\d\d /g)?.length).toBeGreaterThanOrEqual(2);
+      }
+    });
+
+    it("fills the first column before the second, so the least-done group is top left", () => {
+      const rows = table(crowdedState(0), { columns: 120, rows: 40 });
+      const first = rows[0] ?? "";
+
+      expect(first).toContain("G00 ");
+      expect(first).not.toContain("G01 ");
+      expect(rows[1] ?? "").toContain("G01 ");
+    });
+
+    it("says how many of the published groups it is showing", () => {
+      const narrow = render(crowdedState(), { columns: 100, rows: 32 }).join("\n");
+      const tall = render(crowdedState(), { columns: 200, rows: 60 }).join("\n");
+
+      expect(narrow).toMatch(/\d+ of 60 groups/);
+      // A window tall enough for all of them says so without a fraction.
+      expect(tall).toContain("60 groups");
+      expect(tall).not.toContain("of 60 groups");
+    });
+
+    it("marks a group that gained rather than spending a column on the amount", () => {
+      const frame = render(crowdedState(), { columns: 120, rows: 40 }).join("\n");
+
+      expect(frame).toContain("▲");
+    });
+
+    it("keeps every line inside the window, however many groups there are", () => {
+      for (const size of SIZES) {
+        for (const line of render(crowdedState(), size)) {
+          expect(visibleWidth(line)).toBe(size.columns);
+        }
+      }
     });
   });
 

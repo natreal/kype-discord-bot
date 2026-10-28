@@ -283,6 +283,12 @@ describe("lowestGroups", () => {
   it("honours the limit", () => {
     expect(lowestGroups(reading(START, { done: 1, total: 160 }, groups), 1)).toHaveLength(1);
   });
+
+  it("returns the whole ranking when it is not limited", () => {
+    // The window asks for no limit: `progress.json` publishes hundreds of groups and the
+    // number that reach the screen is a question about the terminal, not the model.
+    expect(lowestGroups(reading(START, { done: 1, total: 160 }, groups))).toHaveLength(3);
+  });
 });
 
 describe("movesSince", () => {
@@ -349,7 +355,7 @@ describe("buildModel", () => {
     expect(buildModel(state(), at(-5)).uptimeMs).toBe(0);
   });
 
-  it("caps the group list the frame is handed", () => {
+  it("ranks every group the snapshot publishes, so the frame can fill a tall window", () => {
     const groups = Array.from({ length: 20 }, (_, index) => ({
       name: `libSce${String(index)}`,
       done: index,
@@ -358,6 +364,11 @@ describe("buildModel", () => {
 
     const model = buildModel(state([reading(START, { done: 100, total: 200 }, groups)]), START);
 
-    expect(model.groups).toHaveLength(12);
+    // The list is the model's; how many of it fit is the window's question, and a model
+    // that answered it here would show a full screen the same twelve groups as a pane.
+    expect(model.groups).toHaveLength(20);
+    expect(model.groups.map((group) => group.done)).toEqual([
+      0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19,
+    ]);
   });
 });

@@ -158,7 +158,7 @@ export interface MonitorModel extends MonitorState {
   readonly uptimeMs: number;
   readonly pace: { readonly libraries: MonitorPace; readonly shaders: MonitorPace };
   readonly lastStep: MonitorStep | null;
-  /** Groups with the least of their own work done, least first. */
+  /** Every published group, least of its own work done first: the frame decides how many fit. */
   readonly groups: readonly GroupReading[];
   /** Groups that gained the most since the first held sample. */
   readonly movers: readonly MonitorMovement[];
@@ -205,7 +205,7 @@ export function buildModel(state: MonitorState, now: Date): MonitorModel {
       shaders: paceOf(pointsOf(state.samples, (sample) => sample.shaders.percent)),
     },
     lastStep: lastStepOf(state.samples),
-    groups: lowestGroups(state.progress, 12),
+    groups: lowestGroups(state.progress),
     movers: movesSince(state.samples, 6),
     hourly,
     thisHour: thisHour ?? null,
@@ -322,8 +322,16 @@ export function hourlyBuckets(
  * Least-done rather than biggest: on a porting project the interesting list is what
  * has *not* started, because that is where the next weeks of work are. Ties break on
  * size, so the largest untouched library leads the list.
+ *
+ * `limit` is the caller's business, and the monitor passes none: the snapshot publishes
+ * 368 groups, and which of them reach the screen is a question about the window, not
+ * about the model. Keeping the ranking whole is what lets a tall window list sixty of
+ * them and a short one list six without the model being told how tall the window is.
  */
-export function lowestGroups(sample: MonitorSample | null, limit: number): readonly GroupReading[] {
+export function lowestGroups(
+  sample: MonitorSample | null,
+  limit = Number.POSITIVE_INFINITY,
+): readonly GroupReading[] {
   if (sample === null) {
     return [];
   }

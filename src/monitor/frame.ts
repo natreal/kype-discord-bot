@@ -45,6 +45,18 @@ const MIN_ROWS = 6;
 const MIN_CHART = 12;
 /** Characters of a commit hash worth showing: enough to find it, short enough to read. */
 const SHORT_SHA = 7;
+/** Cells one group needs before a second column of them buys more than it costs. */
+const GROUP_CELL = 34;
+/** Space between two columns of groups: enough to see where one cell ends. */
+const GROUP_GUTTER = 2;
+/** Columns the group table grows to on a very wide window: past six, the names are noise. */
+const MAX_GROUP_COLUMNS = 6;
+/** Characters a group name keeps when the grid is tight: below this, it is no longer a name. */
+const MIN_GROUP_NAME = 8;
+/** Width of the percentage field: `100.00 %` is the widest a published percentage gets. */
+const PERCENT_CELL = 8;
+/** The `▲ ` that marks a group which gained since the first reading, aligned or blank. */
+const MOVER_MARK = 2;
 
 /** The window the frame is drawn into, in cells. */
 export interface FrameSize {
@@ -133,6 +145,13 @@ function panelSections(model: MonitorModel, layout: Layout): readonly Panel[] {
   const liveMax = model.live === undefined ? 2 : model.live === null ? 3 : 5;
   const nowMax = model.progress === null ? 3 : 4;
   const hourlyMax = model.hourly.length === 0 ? 2 : 4;
+  // A work chart with no bar to draw is one heading: asking for the two rows it cannot
+  // fill would leave them blank under the panel, and the group table is where a blank
+  // row is worth something.
+  const worked = model.hourly.some(
+    (bucket) => bucket.librariesAdded > 0 || bucket.shadersAdded > 0,
+  );
+  const hourlyWorkMax = model.hourly.length === 0 || !worked ? 2 : 4;
   const groupMax = model.groups.length === 0 ? 2 : 2 + model.groups.length;
   const logMax = Math.max(2, Math.min(40, 2 + model.events.length));
 
@@ -183,8 +202,8 @@ function panelSections(model: MonitorModel, layout: Layout): readonly Panel[] {
     },
     {
       priority: 74,
-      min: Math.min(3, hourlyMax),
-      max: hourlyMax,
+      min: Math.min(3, hourlyWorkMax),
+      max: hourlyWorkMax,
       draw: (limit) => hourlyWorkLines(model, layout, limit),
     },
     {
@@ -631,28 +650,109 @@ function allocate(panels: readonly Panel[], budget: number): string[] {
 }
 
 /**
- * @returns the per-library table, least-done first, with the groups that moved.
+ * @returns the per-library table, least-done first, holding as many groups as the window
+ * can take.
  *
  * Least-done rather than most: on a porting project the interesting list is what has
- * not started, because that is where the next months of work are. The movement column
- * is folded in rather than given its own panel — a group that moved is worth a
- * footnote next to its percentage, not a second table repeating the same names.
+ * not started, because that is where the next months of work are. The movement mark is
+ * folded in rather than given its own panel — a group that gained is worth a glyph next
+ * to its counts, not a second table repeating the same names.
+ *
+ * The list is a grid, not a column. The snapshot publishes 368 groups, a window is more
+ * than twice as wide as it is tall, and a single column of them left two thirds of a
+ * full screen blank: laying the table out across the window is the difference between
+ * showing six groups and showing sixty. Rows fill down the first column and then the
+ * next, so the least-done groups — the ones the eye starts at — stay on the left.
  */
 function groupLines(model: MonitorModel, layout: Layout, limit: number): readonly string[] {
-  const { paint } = layout;
+  const { paint, width } = layout;
   if (model.groups.length === 0) {
     return [
       "",
       `  ${paint("GROUPS", "heading")}  ${paint("no per-library table in this snapshot", "faint")}`,
     ];
   }
-  const rows = Math.max(0, limit - 2);
+
   const moved = new Map(model.movers.map((mover) => [mover.name, mover.change]));
-  const head = `  ${paint("GROUPS · LEAST COMPLETE", "heading")}${paint("   own coverage, lowest first", "faint")}`;
-  const body = model.groups
-    .slice(0, rows)
-    .map((group) => groupRow(group, moved.get(group.name) ?? null, layout));
+  // The blank that separates the panels and the heading are the panel's first two lines;
+  // everything else it is given is a row of groups.
+  const rows = Math.max(0, limit - 2);
+  const columns = groupColumns(width);
+  const cells = rows === 0 ? [] : model.groups.slice(0, rows * columns);
+  const head = chartHeading(
+    "GROUPS · LEAST COMPLETE",
+    [
+      cells.length === model.groups.length
+        ? `${formatCount(model.groups.length)} groups`
+        : `${formatCount(cells.length)} of ${formatCount(model.groups.length)} groups`,
+      "own coverage, lowest first",
+    ],
+    layout,
+  );
+  if (rows === 0) {
+    return ["", head];
+  }
+  const body =
+    columns === 1
+      ? cells.map((group) => groupRow(group, moved.get(group.name) ?? null, layout))
+      : groupGrid(cells, moved, rows, columns, layout);
   return ["", head, ...body];
+}
+
+/** @returns how many columns the group table is laid out in at `width`. */
+function groupColumns(width: number): number {
+  const fitting = Math.floor((width - 2) / GROUP_CELL);
+  return Math.max(1, Math.min(MAX_GROUP_COLUMNS, fitting));
+}
+
+/**
+ * @returns the grid's rows: `▲`-marked counts, filled down each column in turn.
+ *
+ * One cell is `name  percent  counts`, and every field is a fixed width so the columns
+ * line up; the mover mark is reserved whether or not anything moved, because a table
+ * whose numbers shift sideways when a group gains is a table that has to be re-read.
+ * The bar the single-column layout draws is what pays for the extra columns: at three
+ * columns there is no room for twelve cells of block characters, and the percentage is
+ * the number the bar was standing in for.
+ */
+function groupGrid(
+  groups: readonly GroupReading[],
+  moved: ReadonlyMap<string, number>,
+  rows: number,
+  columns: number,
+  layout: Layout,
+): readonly string[] {
+  const { paint, width } = layout;
+  const cells = groups.map((group) => ({
+    name: group.label,
+    percent: `${formatValue(group.percent, 2)} %`.padStart(PERCENT_CELL),
+    counts: `${formatCount(group.done)}/${formatCount(group.total)}`,
+    moved: moved.has(group.name),
+  }));
+  const counts = Math.max(...cells.map((cell) => cell.counts.length));
+  // A column owns its cell plus the gutter that follows it; the last gutter is padding.
+  const cell = Math.floor((width - 2) / columns) - GROUP_GUTTER;
+  const name = Math.max(MIN_GROUP_NAME, cell - (PERCENT_CELL + 2 + MOVER_MARK + counts));
+  const gutter = " ".repeat(GROUP_GUTTER);
+  // A short table fills down before it fills across: two groups in three columns are two
+  // rows of one, not one row of two with the second column empty to the bottom.
+  const perColumn = Math.max(1, Math.ceil(cells.length / columns));
+  const drawn = Math.min(perColumn, cells.length, Math.max(1, rows));
+
+  return Array.from({ length: drawn }, (_, row) => {
+    const line: string[] = [];
+    for (let index = row; index < cells.length; index += perColumn) {
+      const entry = cells[index];
+      if (entry === undefined) {
+        break;
+      }
+      const mark = entry.moved ? paint("▲ ", "good") : " ".repeat(MOVER_MARK);
+      line.push(
+        `${paint(column(entry.name, name), "dim")} ${paint(entry.percent, "text")} ${mark}${paint(entry.counts.padEnd(counts), "faint")}`,
+      );
+    }
+    return `  ${line.join(gutter)}`;
+  });
 }
 
 /** @returns one group line, with the bar when the window is wide enough to hold it. */
