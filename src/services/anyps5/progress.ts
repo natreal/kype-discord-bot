@@ -11,6 +11,17 @@ import { z } from "zod";
 
 import { ValidationError } from "../../utils/errors.js";
 
+/**
+ * Ceiling on a snapshot body, in characters, applied before the JSON is parsed.
+ *
+ * The published file is not a small document: it carries the name of every function
+ * the project tracks, so it grows with the reimplementation itself (34,139 names and
+ * 2,084,268 bytes on 31 October 2026). The ceiling is deliberately generous — it is
+ * there to reject what was never a snapshot (a Pages error page, a different
+ * document), not to second-guess the size of the project's own file.
+ */
+export const MAX_PROGRESS_BYTES = 8_000_000;
+
 const nameList = z.array(z.string());
 
 const groupSchema = z.object({

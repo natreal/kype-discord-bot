@@ -19,7 +19,7 @@
  */
 import type { GitHubClient } from "../github/client.js";
 import { toError } from "../../utils/errors.js";
-import { parseProgressSnapshot, type AnyPs5Progress } from "./progress.js";
+import { MAX_PROGRESS_BYTES, parseProgressSnapshot, type AnyPs5Progress } from "./progress.js";
 import type {
   RepositoryCommit,
   RepositoryFacts,
@@ -29,8 +29,6 @@ import type {
 
 /** Where the project publishes the statistics its own CI generates. */
 export const PROGRESS_URL = "https://boykopovar.github.io/AnyPS5/progress.json";
-/** The published snapshot is a small JSON document; anything huge is not it. */
-const MAX_PROGRESS_BYTES = 2_000_000;
 /** How many commits one reading keeps. */
 export const COMMIT_WINDOW = 50;
 /** How many pull requests one reading keeps, newest first. */

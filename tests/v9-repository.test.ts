@@ -31,6 +31,7 @@ import {
   RepositoryProbe,
   type RepositoryCache,
 } from "../../src/services/anyps5/repository.probe.js";
+import { MAX_PROGRESS_BYTES } from "../../src/services/anyps5/progress.js";
 import { RepositoryMonitorService } from "../../src/modules/repository/repository.service.js";
 import { deriveEvents } from "../../src/modules/repository/repository.events.js";
 import { buildReportContent } from "../../src/modules/repository/repository-report.content.js";
@@ -715,6 +716,54 @@ describe("conditional requests", () => {
     // An unreachable endpoint never invents an ETag to send back, and the ones that
     // did answer keep theirs.
     expect(result.cache).toEqual({ commitsEtag: "etag-commits", pullRequestsEtag: "etag-pulls" });
+  });
+});
+
+/**
+ * The size guard on the published snapshot.
+ *
+ * The file carries a name list per library and had reached 2,084,268 bytes when the bot
+ * began reporting the project's own progress as unavailable. A guard that rejects the
+ * real document is set too low, and raising it must not turn into having no guard.
+ */
+describe("the published snapshot's size guard", () => {
+  /** @returns a probe whose progress read answers `text`, with GitHub silent. */
+  function probeOver(text: string): RepositoryProbe {
+    return new RepositoryProbe({
+      client: fakeClient({}),
+      target: { owner: "boykopovar", repo: "AnyPS5", branch: "main" },
+      fetchImpl: () => Promise.resolve(new Response(text, { status: 200 })),
+    });
+  }
+
+  it("accepts a snapshot the size of the published one, name lists and all", async () => {
+    // 34,139 names at 50 characters is the shape of the 31 October 2026 snapshot: the
+    // lists, not the counters, are what make the document megabytes.
+    const names = Array.from({ length: 34_139 }, (_unused, index) =>
+      `sceFunction${index}`.padEnd(50, "x"),
+    );
+    const text = JSON.stringify({
+      libraries: {
+        done: 8_623,
+        total: 32_934,
+        percent: 26.18,
+        groups: [{ name: "libSceAgc", done: 8_623, todo: 24_311, done_names: names }],
+      },
+      shaders: { done: 1_166, total: 1_166, percent: 100, groups: [] },
+    });
+    expect(text.length).toBeGreaterThan(1_700_000);
+
+    const result = await probeOver(text).read();
+
+    expect(result.failures).toEqual([]);
+    expect(result.reading.progress?.libraries.done).toBe(8_623);
+  });
+
+  it("rejects a body past the ceiling instead of parsing it", async () => {
+    const result = await probeOver("x".repeat(MAX_PROGRESS_BYTES + 1)).read();
+
+    expect(result.failures).toEqual(["progress"]);
+    expect(result.reading.progress).toBeNull();
   });
 });
 

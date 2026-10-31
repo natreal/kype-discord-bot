@@ -21,7 +21,11 @@
  *   unbounded array of either is a memory leak with a nicer name.
  */
 import { formatCount } from "../modules/repository/repository.events.js";
-import { parseProgressSnapshot, type AnyPs5Progress } from "../services/anyps5/progress.js";
+import {
+  MAX_PROGRESS_BYTES,
+  parseProgressSnapshot,
+  type AnyPs5Progress,
+} from "../services/anyps5/progress.js";
 import { PROGRESS_URL } from "../services/anyps5/repository.probe.js";
 import type { GitHubLiveFacts } from "../services/github/live-feed.js";
 import { toError } from "../utils/errors.js";
@@ -54,8 +58,6 @@ const HISTORY_MS = 24 * 60 * 60_000;
 const SAMPLE_LIMIT = 10_000;
 /** Log lines kept: enough to explain the last few minutes, not a log file. */
 const EVENT_LIMIT = 200;
-/** The published snapshot is a small JSON document; anything huge is not it. */
-const MAX_PROGRESS_BYTES = 2_000_000;
 /** A window poll must not hang behind a dead Pages host. */
 const PROGRESS_TIMEOUT_MS = 15_000;
 /** Characters of a commit hash that are worth a log line. */

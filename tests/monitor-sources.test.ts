@@ -15,6 +15,7 @@
 import { describe, expect, it } from "vitest";
 
 import { MonitorFeed, type LiveSource } from "../../src/monitor/sources.js";
+import { MAX_PROGRESS_BYTES } from "../../src/services/anyps5/progress.js";
 import type { GitHubLiveFacts } from "../../src/services/github/live-feed.js";
 
 const START = new Date("2026-10-25T12:00:00.000Z");
@@ -240,6 +241,18 @@ describe("MonitorFeed", () => {
       const { feed } = feedOver(answers);
 
       expect((await feed.poll()).progressFailure).toMatch(/unexpected shape/);
+    });
+
+    it("treats a body past the ceiling as a failed read", async () => {
+      const answers = server();
+      answers.serve(() => json("x".repeat(MAX_PROGRESS_BYTES + 1)));
+      const { feed } = feedOver(answers);
+
+      const state = await feed.poll();
+
+      expect(state.progress).toBeNull();
+      expect(state.progressFailure).toBe("progress.json is larger than expected");
+      expect(state.failureCount).toBe(1);
     });
 
     it("treats an unreachable host as a failed read, not as an exception", async () => {
