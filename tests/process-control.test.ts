@@ -117,6 +117,14 @@ describe("restart markers", () => {
     expect(hasSupervisor(bare)).toBe(false);
     expect(hasSupervisor(supervised)).toBe(true);
   });
+
+  it("counts the container entrypoint as a supervisor", async () => {
+    const root = await createRoot();
+    await mkdir(path.join(root, "scripts", "docker"), { recursive: true });
+    await writeFile(path.join(root, "scripts", "docker", "entrypoint.sh"), "# stub\n");
+
+    expect(hasSupervisor(root)).toBe(true);
+  });
 });
 
 describe("ProcessControlService", () => {

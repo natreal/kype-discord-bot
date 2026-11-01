@@ -1,0 +1,52 @@
+# Production stack: the bot and its PostgreSQL. See docs/CONTAINER.md.
+# Secrets live in `.env` next to this file (chmod 600), database files in `./data`.
+services:
+  bot:
+    image: ghcr.io/natreal/kype-discord-bot:latest
+    container_name: kype-discord-bot
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    env_file:
+      - .env
+    environment:
+      NODE_ENV: production
+      COMMANDS_AUTO_DEPLOY: ${COMMANDS_AUTO_DEPLOY:-true}
+      DATABASE_URL: postgresql://kype:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@db:5432/kype?schema=public
+    networks:
+      - default
+      - db
+    read_only: true
+    tmpfs:
+      - /tmp
+      - /app/.run:uid=1000,gid=1000
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    mem_limit: 512m
+    pids_limit: 128
+
+  db:
+    image: postgres:17-alpine
+    container_name: kype-discord-bot-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: kype
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
+      POSTGRES_DB: kype
+    volumes:
+      - ./data/postgres:/var/lib/postgresql/data
+    networks:
+      - db
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U kype -d kype"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+networks:
+  # The bot reaches Discord through `default`. PostgreSQL has no way out and publishes no port.
+  db:
+    internal: true

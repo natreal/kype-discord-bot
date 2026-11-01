@@ -17,6 +17,7 @@ import path from "node:path";
 
 import {
   deployRequestPath,
+  hasDeployTask,
   isDeployRequested,
   readDeployRequest,
   requestDeploy,
@@ -37,6 +38,15 @@ afterEach(async () => {
 });
 
 describe("deploy-request", () => {
+  it("finds the deploy task only where the script is installed", async () => {
+    const root = await createRoot();
+    expect(hasDeployTask(root)).toBe(false);
+
+    await mkdir(path.join(root, "scripts", "deploy"), { recursive: true });
+    await writeFile(path.join(root, "scripts", "deploy", "deploy.ps1"), "# stub\n");
+    expect(hasDeployTask(root)).toBe(true);
+  });
+
   it("reports nothing pending for a fresh project", async () => {
     const root = await createRoot();
     expect(isDeployRequested(root)).toBe(false);
@@ -76,7 +86,12 @@ describe("build-info", () => {
     const root = await createRoot();
     const file = path.join(root, "build-info.json");
     writeBuildInfo(
-      { commit: "abcdef1234567890", subject: "fix: thing", builtAt: "2026-01-01T00:00:00.000Z", dirty: false },
+      {
+        commit: "abcdef1234567890",
+        subject: "fix: thing",
+        builtAt: "2026-01-01T00:00:00.000Z",
+        dirty: false,
+      },
       file,
     );
 

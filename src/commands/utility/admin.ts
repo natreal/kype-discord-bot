@@ -13,7 +13,7 @@ import { defineSlashCommand } from "../define.js";
 import { buildInviteLink, profilePermissionValue } from "../../utils/invite.js";
 import { brandedEmbed, errorEmbed } from "../../utils/presenters.js";
 import { INSTALL_PROFILES } from "../../services/permissions/index.js";
-import { isDeployRequested, requestDeploy } from "../../runtime/deploy-request.js";
+import { hasDeployTask, isDeployRequested, requestDeploy } from "../../runtime/deploy-request.js";
 import type { CommandExecutionContext } from "../context.js";
 
 export default defineSlashCommand({
@@ -287,6 +287,19 @@ async function handleUpdate(
   if (!guild) {
     await interaction.reply({
       content: "This command must be run inside a server.",
+      ephemeral: true,
+    });
+    return;
+  }
+
+  if (!hasDeployTask()) {
+    await interaction.reply({
+      embeds: [
+        errorEmbed(
+          "No deploy task on this host",
+          "This installation has no scheduled deploy task to pick up the request. In a container, a push to `main` publishes the new image.",
+        ),
+      ],
       ephemeral: true,
     });
     return;
