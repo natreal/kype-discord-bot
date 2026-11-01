@@ -37,7 +37,8 @@ function git(...args) {
   }
 }
 
-const commit = git("rev-parse", "HEAD") || "unknown";
+// A container build has no `.git`, so the commit arrives as a build argument.
+const commit = process.env["BUILD_COMMIT"] || git("rev-parse", "HEAD") || "unknown";
 const subject = commit === "unknown" ? "" : git("log", "-1", "--pretty=%s", "HEAD").slice(0, 200);
 const dirty = commit !== "unknown" && git("status", "--porcelain").length > 0;
 

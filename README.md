@@ -656,7 +656,7 @@ to Discord) and both take an optional `reason` that is written to the log.
 
 - `/stop` closes the Discord session and the database pool, then exits. Nothing brings
   the bot back: start it again with the launcher (`npm run bot:start`, `Start-Bot.cmd`
-  or the desktop icon).
+  or the desktop icon), or with `docker compose restart bot` in a container.
 - `/restart` does the same and tells the supervisor to bring it back. It writes
   `.run/restart.request` before shutting down; `scripts/windows/supervisor.ps1` and
   `scripts/desktop/supervisor.sh` see that marker, delete it and relaunch, and the
@@ -1414,6 +1414,9 @@ arbitrary code.
 - Rate-limit and Discord API failures are distinguished from programming errors.
 
 ---
+To run the bot in a container on a Linux server instead, see
+[docs/CONTAINER.md](docs/CONTAINER.md).
+
 ## Automated deployment (GitHub to Windows PC)
 
 The host PC **pulls**; GitHub never pushes to it. A Windows scheduled task runs

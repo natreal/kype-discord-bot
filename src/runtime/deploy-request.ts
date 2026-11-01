@@ -33,6 +33,11 @@ export interface DeployRequestDetails {
   readonly reason?: string;
 }
 
+/** Whether this installation has the scheduled task that consumes a request. */
+export function hasDeployTask(projectRoot: string = process.cwd()): boolean {
+  return existsSync(path.join(projectRoot, "scripts", "deploy", "deploy.ps1"));
+}
+
 /** Whether a deploy has been requested and not yet consumed. */
 export function isDeployRequested(projectRoot: string = process.cwd()): boolean {
   return existsSync(deployRequestPath(projectRoot));

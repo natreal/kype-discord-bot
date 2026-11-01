@@ -89,6 +89,8 @@ export function hasSupervisor(projectRoot: string = process.cwd()): boolean {
     path.join(projectRoot, "scripts", "windows", "supervisor.ps1"),
     // The macOS supervisor and `botctl.sh`.
     path.join(projectRoot, "scripts", "desktop", "supervisor.sh"),
+    // The container entrypoint, with Docker's restart policy behind it.
+    path.join(projectRoot, "scripts", "docker", "entrypoint.sh"),
   ];
   return candidates.some((candidate) => existsSync(candidate));
 }

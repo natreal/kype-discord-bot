@@ -62,7 +62,7 @@ export default defineSlashCommand({
             [
               "Shutting down gracefully: the Discord connection is closed and the database pool released.",
               "",
-              "Nothing restarts the bot automatically — start it again with the launcher (`npm run bot:start`, `Start-Bot.cmd` or the desktop icon).",
+              "Nothing restarts the bot automatically — start it again with the launcher (`npm run bot:start`, `Start-Bot.cmd` or the desktop icon), or with `docker compose restart bot` in a container.",
             ].join("\n"),
           )
           .addFields({ name: "Uptime", value: formatDuration(context.uptimeMs), inline: true }),
